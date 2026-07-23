@@ -1,0 +1,19 @@
+# OS / editor cruft
+.DS_Store
+*~
+*.swp
+
+# C / C++ / CMake
+/build/
+*.o
+*.a
+*.so
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Debian packaging
+*.deb
