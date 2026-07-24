@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace starbase::index {
@@ -80,10 +82,12 @@ std::optional<std::string> type_or_null(extract::ImageType t) {
 
 }  // namespace
 
-StoreResult store_file(db::Database& db, const FileInfo& info,
-                       const fits::RawHeader& header,
-                       const extract::HeaderMapping& mapping,
-                       const extract::SiteContext& site) {
+namespace {
+
+StoreResult store_file_once(db::Database& db, const FileInfo& info,
+                            const fits::RawHeader& header,
+                            const extract::HeaderMapping& mapping,
+                            const extract::SiteContext& site) {
     StoreResult result;
 
     // Case-folded path for the hash when the filesystem does not distinguish
@@ -201,11 +205,35 @@ StoreResult store_file(db::Database& db, const FileInfo& info,
 
         db.exec("COMMIT");
     } catch (...) {
-        db.exec("ROLLBACK");
+        try { db.exec("ROLLBACK"); } catch (const std::exception&) { /* already rolled back */ }
         throw;
     }
 
     return result;
+}
+
+}  // namespace
+
+StoreResult store_file(db::Database& db, const FileInfo& info,
+                       const fits::RawHeader& header,
+                       const extract::HeaderMapping& mapping,
+                       const extract::SiteContext& site) {
+    // Concurrent workers' transactions can deadlock on InnoDB locks (a normal
+    // outcome under write contention). The documented remedy is to restart the
+    // transaction, so retry a few times with a short escalating backoff before
+    // giving up. A non-retryable error propagates immediately.
+    constexpr int kMaxAttempts = 10;
+    for (int attempt = 1;; ++attempt) {
+        try {
+            return store_file_once(db, info, header, mapping, site);
+        } catch (const db::DbError& e) {
+            if (!e.retryable() || attempt >= kMaxAttempts) throw;
+            // Escalating backoff (2ms, 4ms, 8ms, ... capped) to let the winning
+            // transaction commit and to desynchronize contending workers.
+            const int ms = std::min(1 << attempt, 256);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
+    }
 }
 
 }  // namespace starbase::index

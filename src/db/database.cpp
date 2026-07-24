@@ -115,7 +115,7 @@ int Database::apply_script(const std::string& path) {
 
 std::vector<Database::Row> Database::query(const std::string& sql) {
     if (mysql_real_query(impl_->conn, sql.c_str(), sql.size()) != 0)
-        throw DbError(std::string("query: ") + mysql_error(impl_->conn));
+        throw DbError(std::string("query: ") + mysql_error(impl_->conn), mysql_errno(impl_->conn));
     MYSQL_RES* res = mysql_store_result(impl_->conn);
     std::vector<Row> rows;
     if (res) {
@@ -139,7 +139,7 @@ std::vector<Database::Row> Database::query(const std::string& sql) {
 
 long long Database::exec(const std::string& sql) {
     if (mysql_real_query(impl_->conn, sql.c_str(), sql.size()) != 0)
-        throw DbError(std::string("exec: ") + mysql_error(impl_->conn));
+        throw DbError(std::string("exec: ") + mysql_error(impl_->conn), mysql_errno(impl_->conn));
     return static_cast<long long>(mysql_insert_id(impl_->conn));
 }
 

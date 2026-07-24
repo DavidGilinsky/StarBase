@@ -63,10 +63,19 @@ struct RootFields {
     std::optional<std::string> ignore_globs;
 };
 
-// Thrown for any database-level failure, carrying the server's message.
+// Thrown for any database-level failure, carrying the server's message and the
+// MySQL error number so callers can distinguish, e.g., a deadlock (1213) or a
+// lock-wait timeout (1205) -- both of which are retryable -- from a real error.
 class DbError : public std::runtime_error {
 public:
-    explicit DbError(const std::string& what) : std::runtime_error(what) {}
+    explicit DbError(const std::string& what, unsigned int err = 0)
+        : std::runtime_error(what), errno_(err) {}
+    unsigned int db_errno() const { return errno_; }
+    // A transient contention error that the documented remedy is to retry.
+    bool retryable() const { return errno_ == 1213 || errno_ == 1205; }
+
+private:
+    unsigned int errno_ = 0;
 };
 
 // One connection. Not thread-safe: each thread opens its own, as in the

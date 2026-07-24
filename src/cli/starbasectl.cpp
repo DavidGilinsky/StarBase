@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,9 @@
 
 #ifdef SB_HAVE_FITS
 #include "fits_reader.hpp"
+#include "mapping_loader.hpp"
 #include "resolver.hpp"
+#include "scanner.hpp"
 #endif
 
 namespace {
@@ -378,8 +381,50 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (cmd == "scan") {
-            std::cerr << "starbasectl: 'scan' is not implemented yet (M3)\n";
-            return 3;
+            const auto mapping = starbase::index::load_mapping(d);
+            const starbase::extract::SiteContext site{};  // TODO: per-root site offset
+            std::vector<db::RootRow> roots;
+            if (args.size() >= 2) {
+                auto r = d.find_root_by_label(args[1]);
+                if (!r) { std::cerr << "error: no such root: " << args[1] << "\n"; return 1; }
+                roots.push_back(*r);
+            } else {
+                for (const auto& r : d.list_roots())
+                    if (r.enabled) roots.push_back(r);
+            }
+            if (roots.empty()) { std::cout << "no enabled roots to scan\n"; return 0; }
+
+            int rc = 0;
+            for (const auto& r : roots) {
+                starbase::scan::ScanConfig sc;
+                sc.threads = cfg.scanner_threads;
+                sc.queue_depth = cfg.scanner_queue_depth;
+                sc.settle_seconds = r.settle_seconds;
+                sc.case_sensitive = r.case_sensitive;
+                if (!cfg.default_ignore_globs.empty()) {
+                    std::stringstream ss(cfg.default_ignore_globs);
+                    std::string g;
+                    while (std::getline(ss, g, ',')) {
+                        const auto b = g.find_first_not_of(" \t");
+                        const auto e = g.find_last_not_of(" \t");
+                        if (b != std::string::npos) sc.ignore_globs.push_back(g.substr(b, e - b + 1));
+                    }
+                }
+                std::cout << "scanning " << r.label << " (" << r.path << ") with "
+                          << (sc.threads ? std::to_string(sc.threads) : std::string("auto"))
+                          << " threads...\n";
+                try {
+                    const auto st = starbase::scan::scan_root(dc, r, mapping, site, sc);
+                    std::cout << "  " << st.files_seen << " seen, " << st.files_added << " added, "
+                              << st.files_updated << " updated, " << st.files_skipped << " unchanged, "
+                              << st.files_settling << " settling, " << st.files_error << " error; "
+                              << st.frames_written << " frames in " << st.duration_ms << " ms\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "  scan failed: " << e.what() << "\n";
+                    rc = 1;
+                }
+            }
+            return rc;
         }
 
         std::cerr << "starbasectl: unknown command '" << cmd << "'\n";
