@@ -77,6 +77,13 @@ if(SB_WITH_FITS)
         ${CFITSIO_INCLUDE_DIRS})
     target_link_directories(sb_fits PUBLIC ${CFITSIO_LIBRARY_DIRS})
     target_link_libraries(sb_fits PUBLIC sb_core ${CFITSIO_LIBRARIES} OpenSSL::Crypto)
+
+    # Header-to-frame resolver: raw cards -> normalized fields, via the mapping.
+    add_library(sb_extract STATIC
+        src/extract/resolver.cpp
+        src/extract/resolver_defaults.cpp)
+    target_include_directories(sb_extract PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/extract)
+    target_link_libraries(sb_extract PUBLIC sb_fits)
 endif()
 
 # ---- Database layer (requires libmariadb-dev) ----
@@ -130,6 +137,11 @@ if(SB_BUILD_TESTS)
         target_link_libraries(fits_test PRIVATE sb_fits ${CFITSIO_LIBRARIES})
         target_include_directories(fits_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
         add_test(NAME fits_test COMMAND fits_test)
+
+        add_executable(resolver_test tests/resolver_test.cpp)
+        target_link_libraries(resolver_test PRIVATE sb_extract ${CFITSIO_LIBRARIES})
+        target_include_directories(resolver_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
+        add_test(NAME resolver_test COMMAND resolver_test)
     endif()
 
     if(SB_WITH_DB)
