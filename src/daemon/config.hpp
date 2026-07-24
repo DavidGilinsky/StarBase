@@ -42,7 +42,7 @@ struct Config {
 
     // [api]
     std::string api_bind = "127.0.0.1";
-    int         api_port = 8080;
+    int         api_port = 8642;  // distinct from NightWatcher2 (8080) and AirWatcher (8686)
     bool        api_tls = false;
     std::string api_tls_cert;
     std::string api_tls_key;

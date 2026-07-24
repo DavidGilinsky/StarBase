@@ -120,12 +120,29 @@ if(SB_WITH_DB)
         add_library(sb_scan STATIC src/scan/scanner.cpp)
         target_include_directories(sb_scan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/scan)
         target_link_libraries(sb_scan PUBLIC sb_index)
+
+        # Vendored cpp-httplib + nlohmann/json (one config across all TUs).
+        add_library(sb_httplib INTERFACE)
+        target_include_directories(sb_httplib SYSTEM INTERFACE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
+        target_link_libraries(sb_httplib INTERFACE Threads::Threads)
+
+        # Embedded HTTP/JSON API and static web UI.
+        add_library(sb_api STATIC src/api/http_server.cpp)
+        target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_httplib)
     endif()
 endif()
 
 # ---- starbased daemon ----
 add_executable(starbased src/daemon/main.cpp)
-target_link_libraries(starbased PRIVATE sb_core)
+if(SB_WITH_DB AND SB_WITH_FITS)
+    target_link_libraries(starbased PRIVATE sb_api)
+    target_compile_definitions(starbased PRIVATE SB_HAVE_API=1)
+else()
+    target_link_libraries(starbased PRIVATE sb_core)
+endif()
 
 # ---- starbasectl CLI ----
 # Most commands talk to the database, so it is only built with the database

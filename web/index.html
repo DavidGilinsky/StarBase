@@ -1,0 +1,32 @@
+<!doctype html>
+<!--
+  Author:        David Gilinsky
+  File:          web/index.html
+  Purpose:       StarBase web UI shell: dashboard, browse/query grid, and frame
+                 detail, as a static SPA against the /api/v1 API. No build step.
+  Created:       2026-07-24
+  Last Modified: 2026-07-24
+  Version:       0.1.0
+  License:       GPL-3.0-or-later
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StarBase</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header>
+    <h1>Star<span>Base</span></h1>
+    <nav>
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="browse">Browse</button>
+    </nav>
+    <span id="conn" class="conn"></span>
+  </header>
+  <main id="app"></main>
+  <div id="detail" class="drawer hidden"></div>
+  <script src="/js/app.js"></script>
+</body>
+</html>

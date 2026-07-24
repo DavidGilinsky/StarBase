@@ -10,6 +10,7 @@
 // License:       GPL-3.0-or-later
 // ---------------------------------------------------------------------------
 #include <atomic>
+#include <memory>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -22,6 +23,10 @@
 #include "config.hpp"
 #include "logging.hpp"
 #include "starbase/version.hpp"
+
+#ifdef SB_HAVE_API
+#include "http_server.hpp"
+#endif
 
 using starbase::Config;
 using starbase::log_error;
@@ -117,8 +122,33 @@ int main(int argc, char** argv) {
             "the systemd EnvironmentFile (/etc/starbase/starbase.env).");
     }
 
-    // Milestones M1-M4 attach the repository, scanner, and HTTP server here.
-    log_info("no subsystems enabled yet (M0 skeleton); idling");
+#ifdef SB_HAVE_API
+    std::unique_ptr<starbase::api::HttpServer> server;
+    try {
+        starbase::api::ApiConfig api;
+        api.bind = cfg.api_bind;
+        api.port = cfg.api_port;
+        api.web_root = cfg.web_root;
+        api.schema_file = cfg.schema_file;
+        api.seed_file = cfg.seed_file;
+        api.db.host = cfg.db_host;
+        api.db.port = static_cast<uint16_t>(cfg.db_port);
+        api.db.user = cfg.db_user;
+        api.db.database = cfg.db_name;
+        if (const char* v = std::getenv("SB_DB_PASSWORD")) api.db.password = v;
+        if (const char* v = std::getenv("SB_API_TOKEN")) api.token = v;
+        // Off-localhost with no token is a footgun: warn loudly.
+        if (api.bind != "127.0.0.1" && api.bind != "localhost" && api.token.empty())
+            log_warn("API bound off localhost with no SB_API_TOKEN; writes are open to the LAN");
+        server = std::make_unique<starbase::api::HttpServer>(std::move(api));
+        server->start();
+    } catch (const std::exception& e) {
+        log_error(std::string("failed to start API server: ") + e.what());
+        return 1;
+    }
+#else
+    log_info("built without the API/database layer; idling");
+#endif
 
     while (!g_stop.load()) {
         if (g_reload.exchange(false)) {
@@ -135,5 +165,8 @@ int main(int argc, char** argv) {
     }
 
     log_info("shutting down");
+#ifdef SB_HAVE_API
+    if (server) server->stop();
+#endif
     return 0;
 }

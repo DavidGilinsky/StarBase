@@ -35,7 +35,7 @@ user = starbase
 [api]
 # Built-in HTTP server (REST API + web UI).
 bind = 127.0.0.1
-port = 8080
+port = 8642
 # Serve over HTTPS. When on and no certificate exists, a self-signed pair is
 # generated at the paths below. Bound off localhost, ALL requests (reads
 # included) require a login or an SB_API_TOKEN.

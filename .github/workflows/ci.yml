@@ -38,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check web JS syntax
+        run: for f in web/js/*.js; do node --check "$f"; done
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
