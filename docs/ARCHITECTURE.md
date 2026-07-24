@@ -99,6 +99,29 @@ Two tiers, because the storage answer is "mixed".
 extractor threads consume. Runs on a per-root interval and on demand. Bounded
 queue is what keeps memory flat on a tree of a million frames.
 
+*Why threaded, and how many threads (measured, not guessed).* A header read is
+network-latency-bound: it is a handful of NFS round-trips (open, read the header
+blocks, close), not computation. That is exactly the workload concurrency helps,
+because idle threads waiting on a round-trip overlap with others making progress.
+Measured against the live archive with `tools/scan_bench` (nconnect=8 in effect):
+
+| regime | 1 thread | 8 | 16 | 32 |
+| --- | --- | --- | --- | --- |
+| truly cold (milan disk) | ~90 f/s | — | ~640 f/s* | — |
+| pixy-cold / milan-ARC-warm | 448 f/s | 8,580 (19x) | 13,470 (30x) | 16,800 (37x) |
+| fully cached (CPU-bound) | 6,900 f/s | 26,900 (3.9x) | plateau | plateau |
+
+(*via a process-per-file harness, so process startup caps the absolute rate; the
+scaling is the point.) The lesson: in the cached/CPU-bound regime concurrency
+plateaus around 4x, but the sweep's real regime is latency-bound, where it scales
+to ~19x at 8 threads and ~30x at 16, with clear diminishing returns past 16. A
+single-threaded cold sweep of ~70k frames is ~13 min; 8-16 workers cut that to
+roughly 1-2 min. So `scanner_threads = 0` (auto) resolves to
+`min(hardware_concurrency, 16)`: past ~16 the gain is small and it only adds RPC
+pressure on milan's nfsd. This is why the walk is a producer/consumer pool from
+the start, with the degenerate `threads=1` case reserved for debugging, not a
+throwaway single-threaded implementation.
+
 **Watch (accelerator).** Optional per-root inotify: `IN_CLOSE_WRITE`,
 `IN_MOVED_TO`, `IN_MOVED_FROM`, `IN_DELETE`, and `IN_CREATE|IN_ISDIR` to add
 watches for new subdirectories. Configured per root as

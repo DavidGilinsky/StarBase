@@ -84,6 +84,12 @@ if(SB_WITH_FITS)
         src/extract/resolver_defaults.cpp)
     target_include_directories(sb_extract PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/extract)
     target_link_libraries(sb_extract PUBLIC sb_fits)
+
+    # Throughput benchmark (dev tool; not installed): measures header-read
+    # concurrency scaling against a real archive to size the scanner's workers.
+    add_executable(scan_bench tools/scan_bench.cpp)
+    target_link_libraries(scan_bench PRIVATE sb_fits ${CFITSIO_LIBRARIES})
+    target_include_directories(scan_bench PRIVATE ${CFITSIO_INCLUDE_DIRS})
 endif()
 
 # ---- Database layer (requires libmariadb-dev) ----
