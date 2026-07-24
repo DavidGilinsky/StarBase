@@ -105,11 +105,17 @@ add_executable(starbased src/daemon/main.cpp)
 target_link_libraries(starbased PRIVATE sb_core)
 
 # ---- starbasectl CLI ----
-# Every command it offers talks to the database, so it is only built with the
-# database layer. A -DSB_WITH_DB=OFF build still produces a working daemon.
+# Most commands talk to the database, so it is only built with the database
+# layer. A -DSB_WITH_DB=OFF build still produces a working daemon. When the FITS
+# extractor is also built, `starbasectl probe` reads and resolves a frame with
+# no database connection at all.
 if(SB_WITH_DB)
     add_executable(starbasectl src/cli/starbasectl.cpp)
     target_link_libraries(starbasectl PRIVATE sb_db)
+    if(SB_WITH_FITS)
+        target_link_libraries(starbasectl PRIVATE sb_extract)
+        target_compile_definitions(starbasectl PRIVATE SB_HAVE_FITS=1)
+    endif()
 endif()
 
 # ---- Generated example configuration ----

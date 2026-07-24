@@ -21,6 +21,11 @@
 #include "logging.hpp"
 #include "starbase/version.hpp"
 
+#ifdef SB_HAVE_FITS
+#include "fits_reader.hpp"
+#include "resolver.hpp"
+#endif
+
 namespace {
 
 namespace db = starbase::db;
@@ -38,6 +43,10 @@ void print_help(const char* argv0) {
         << "  set-root <label> <k=v>.. Change a root (enabled, writable, watch_mode,\n"
         << "                           scan_interval_s, settle_seconds)\n"
         << "  remove-root <label>      Unregister a root (indexed rows are removed)\n"
+#ifdef SB_HAVE_FITS
+        << "  probe <file> [--cards]   Read a FITS frame and show resolved fields\n"
+        << "                           and fingerprint (no database needed)\n"
+#endif
         << "  version                  Print version and exit\n\n"
         << "The database password is read from SB_DB_PASSWORD.\n"
         << "SB_DB_HOST/PORT/USER/NAME override the config file when set.\n";
@@ -194,6 +203,69 @@ int cmd_list_roots(db::Database& d) {
     return 0;
 }
 
+#ifdef SB_HAVE_FITS
+// Read and resolve a single frame without touching the database, so the
+// extractor and header mapping can be checked against any file on disk.
+int cmd_probe(const std::string& path, bool show_cards) {
+    namespace fits = starbase::fits;
+    namespace ex = starbase::extract;
+
+    fits::RawHeader header;
+    try {
+        header = fits::read_header(path);
+    } catch (const fits::FitsError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    const auto imgs = header.image_hdus();
+    std::cout << path << "\n"
+              << "  HDUs: " << header.hdus.size() << ", image HDUs: " << imgs.size() << "\n";
+    if (imgs.empty()) {
+        std::cout << "  no image HDU (nothing to resolve)\n";
+        return 0;
+    }
+
+    const auto mapping = ex::HeaderMapping::defaults();
+    auto opt = [](const std::optional<std::string>& v) { return v.value_or("-"); };
+    auto optd = [](const std::optional<double>& v) {
+        return v ? std::to_string(*v) : std::string("-");
+    };
+    auto opti = [](const std::optional<int>& v) {
+        return v ? std::to_string(*v) : std::string("-");
+    };
+
+    for (const fits::Hdu* h : imgs) {
+        const auto f = ex::resolve(*h, mapping);
+        std::cout << "  HDU " << h->index << "  " << h->naxis1 << "x" << h->naxis2
+                  << "  " << h->cards.size() << " cards\n"
+                  << "    fingerprint  " << fits::to_hex(fits::fingerprint(*h)) << "\n"
+                  << "    type         " << ex::to_string(f.image_type) << "\n"
+                  << "    object       " << opt(f.object) << "\n"
+                  << "    filter       " << opt(f.filter_raw)
+                  << (f.filter_defaulted ? "  (defaulted)" : "") << "\n"
+                  << "    date_obs     " << opt(f.date_obs_utc) << "\n"
+                  << "    night        " << opt(f.session_night) << "\n"
+                  << "    exposure_s   " << optd(f.exposure_s) << "\n"
+                  << "    gain/offset  " << opti(f.gain) << " / " << opti(f.offset_adu) << "\n"
+                  << "    binning      " << opti(f.binx) << "x" << opti(f.biny) << "\n"
+                  << "    temp set/ccd " << optd(f.set_temp_c) << " / " << optd(f.ccd_temp_c) << "\n"
+                  << "    ra/dec deg   " << optd(f.ra_deg) << " / " << optd(f.dec_deg) << "\n"
+                  << "    camera(raw)  " << opt(f.instrume_raw) << "\n"
+                  << "    scope(raw)   " << opt(f.telescope_raw) << " (mount; untrusted)\n"
+                  << "    focal_len_mm " << optd(f.focal_len_mm) << "\n"
+                  << "    pier/roworder " << opt(f.pier_side) << " / " << opt(f.row_order) << "\n";
+        if (show_cards) {
+            std::cout << "    --- all cards ---\n";
+            for (const auto& c : h->cards)
+                std::cout << "    " << c.keyword << " = " << c.value
+                          << (c.comment.empty() ? "" : "  / " + c.comment) << "\n";
+        }
+    }
+    return 0;
+}
+#endif
+
 int cmd_set_root(db::Database& d, const std::string& label,
                  const std::vector<std::string>& kvs) {
     db::RootFields f;
@@ -248,6 +320,21 @@ int main(int argc, char** argv) {
     }
 
     const std::string cmd = args[0];
+
+#ifdef SB_HAVE_FITS
+    // probe reads a file directly; it neither needs nor opens a database.
+    if (cmd == "probe") {
+        if (args.size() < 2) {
+            std::cerr << "usage: starbasectl probe <file> [--cards]\n";
+            return 2;
+        }
+        bool show_cards = false;
+        for (size_t i = 2; i < args.size(); ++i)
+            if (args[i] == "--cards") show_cards = true;
+        return cmd_probe(args[1], show_cards);
+    }
+#endif
+
     const starbase::Config cfg = load_config_or_defaults(config_path);
     const db::DbConfig dc = db_config_from(cfg);
 
