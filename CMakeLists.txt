@@ -67,10 +67,16 @@ if(SB_WITH_DB OR SB_WITH_FITS)
     find_package(PkgConfig REQUIRED)
 endif()
 if(SB_WITH_FITS)
-    # Probed ahead of the extractor (M2) so a build host missing the dependency
-    # fails at configure time rather than a milestone later.
     pkg_check_modules(CFITSIO REQUIRED cfitsio)
+    find_package(OpenSSL REQUIRED)  # MD5 for the identity fingerprint
     message(STATUS "CFITSIO: ${CFITSIO_VERSION}")
+
+    add_library(sb_fits STATIC src/fits/fits_reader.cpp)
+    target_include_directories(sb_fits PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/fits
+        ${CFITSIO_INCLUDE_DIRS})
+    target_link_directories(sb_fits PUBLIC ${CFITSIO_LIBRARY_DIRS})
+    target_link_libraries(sb_fits PUBLIC sb_core ${CFITSIO_LIBRARIES} OpenSSL::Crypto)
 endif()
 
 # ---- Database layer (requires libmariadb-dev) ----
@@ -116,6 +122,15 @@ if(SB_BUILD_TESTS)
     add_executable(fsinfo_test tests/fsinfo_test.cpp)
     target_link_libraries(fsinfo_test PRIVATE sb_core)
     add_test(NAME fsinfo_test COMMAND fsinfo_test)
+
+    if(SB_WITH_FITS)
+        # Hermetic: writes a synthetic FITS and reads it back. Also checks a real
+        # archive frame when SB_TEST_FITS points at one.
+        add_executable(fits_test tests/fits_test.cpp)
+        target_link_libraries(fits_test PRIVATE sb_fits ${CFITSIO_LIBRARIES})
+        target_include_directories(fits_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
+        add_test(NAME fits_test COMMAND fits_test)
+    endif()
 
     if(SB_WITH_DB)
         # Skips itself (exit 0) unless SB_TEST_DB_NAME is set, so `ctest` is
