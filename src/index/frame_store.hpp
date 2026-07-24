@@ -17,6 +17,7 @@
 #include <string>
 
 #include "database.hpp"
+#include "equipment.hpp"
 #include "fits_reader.hpp"
 #include "resolver.hpp"
 
@@ -53,12 +54,13 @@ struct StoreResult {
 // transaction so a file is never left half-written. Throws db::DbError on
 // failure.
 //
-// Equipment ids (camera_id, rig_id, filter_id) are left null here; resolving
-// them against the registry is a separate step. The raw values they key on
-// (instrume_raw, focal_len_mm, filter_raw) are stored.
+// When `equip` is given, each frame's camera_id, rig_id, filter_id, and site_id
+// are resolved (auto-creating cameras/filters) and stored; when null they are
+// left NULL. The resolver caches per instance, so pass one per worker.
 StoreResult store_file(db::Database& db, const FileInfo& info,
                        const fits::RawHeader& header,
                        const extract::HeaderMapping& mapping,
-                       const extract::SiteContext& site = {});
+                       const extract::SiteContext& site = {},
+                       EquipmentResolver* equip = nullptr);
 
 }  // namespace starbase::index

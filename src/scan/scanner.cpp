@@ -22,6 +22,7 @@
 #include <thread>
 
 #include "bounded_queue.hpp"
+#include "equipment.hpp"
 #include "fits_reader.hpp"
 #include "frame_store.hpp"
 #include "logging.hpp"
@@ -115,6 +116,22 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     const long settle = cfg.settle_seconds;
     auto stop_requested = [&] { return cfg.stop && cfg.stop->load(); };
 
+    // Load the equipment registry once and share it read-only. Its default site
+    // supplies the observing-night offset: without this the night would roll at
+    // UTC noon instead of the observatory's local noon, mis-labelling frames
+    // taken in the evening either side of midnight UTC.
+    idx::EquipmentRegistry registry;
+    try {
+        db::Database rdb(db_config);
+        registry = idx::EquipmentRegistry::load(rdb);
+    } catch (const std::exception& e) {
+        log_warn(std::string("scan: could not load equipment registry (")
+                 + e.what() + "); ids and night offset unresolved");
+    }
+    extract::SiteContext night_site = site;
+    if (site.utc_offset_hours == 0.0 && registry.default_site_id)
+        night_site.utc_offset_hours = registry.default_site_offset_h;
+
     // ---- workers ----
     auto worker = [&] {
         db::Database db(db_config);  // one connection per worker
@@ -126,6 +143,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
         // own insert is visible within the transaction regardless).
         try { db.exec("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"); }
         catch (const std::exception&) { /* fall back to the server default */ }
+        idx::EquipmentResolver equip(registry);  // per-worker, caches camera/filter lookups
         const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         for (;;) {
             auto item = queue.pop();
@@ -181,7 +199,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
                 info.inode = static_cast<long long>(st.st_ino);
                 info.case_sensitive = cfg.case_sensitive;
 
-                const auto sr = idx::store_file(db, info, header, mapping, site);
+                const auto sr = idx::store_file(db, info, header, mapping, night_site, &equip);
                 frames.fetch_add(sr.frames_written);
                 (known ? updated : added).fetch_add(1);
             } catch (const std::exception& e) {

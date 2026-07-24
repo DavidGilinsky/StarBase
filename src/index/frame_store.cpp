@@ -87,7 +87,7 @@ namespace {
 StoreResult store_file_once(db::Database& db, const FileInfo& info,
                             const fits::RawHeader& header,
                             const extract::HeaderMapping& mapping,
-                            const extract::SiteContext& site) {
+                            const extract::SiteContext& site, EquipmentResolver* equip) {
     StoreResult result;
 
     // Case-folded path for the hash when the filesystem does not distinguish
@@ -131,6 +131,7 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
         for (const fits::Hdu* hdu : header.image_hdus()) {
             const auto rf = extract::resolve(*hdu, mapping, site);
             const std::string fp = fits::to_hex(fits::fingerprint(*hdu));
+            const EquipmentIds eq = equip ? equip->resolve(rf, db) : EquipmentIds{};
 
             Upsert fr(db);
             fr.num("file_id", std::optional<long long>(file_id));
@@ -150,6 +151,10 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
             fr.str("instrume_raw", rf.instrume_raw);
             fr.str("telescope_raw", rf.telescope_raw);
             fr.real("focal_len_mm", rf.focal_len_mm);
+            fr.inum("camera_id", eq.camera_id);
+            fr.inum("rig_id", eq.rig_id);
+            fr.inum("filter_id", eq.filter_id);
+            fr.inum("site_id", eq.site_id);
             fr.inum("gain", rf.gain);
             fr.inum("offset_adu", rf.offset_adu);
             fr.inum("binx", rf.binx);
@@ -217,7 +222,7 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
 StoreResult store_file(db::Database& db, const FileInfo& info,
                        const fits::RawHeader& header,
                        const extract::HeaderMapping& mapping,
-                       const extract::SiteContext& site) {
+                       const extract::SiteContext& site, EquipmentResolver* equip) {
     // Concurrent workers' transactions can deadlock on InnoDB locks (a normal
     // outcome under write contention). The documented remedy is to restart the
     // transaction, so retry a few times with a short escalating backoff before
@@ -225,7 +230,7 @@ StoreResult store_file(db::Database& db, const FileInfo& info,
     constexpr int kMaxAttempts = 10;
     for (int attempt = 1;; ++attempt) {
         try {
-            return store_file_once(db, info, header, mapping, site);
+            return store_file_once(db, info, header, mapping, site, equip);
         } catch (const db::DbError& e) {
             if (!e.retryable() || attempt >= kMaxAttempts) throw;
             // Escalating backoff (2ms, 4ms, 8ms, ... capped) to let the winning

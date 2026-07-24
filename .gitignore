@@ -93,6 +93,7 @@ tls/
 !sql/schema.sql
 !sql/setup.sql
 !sql/seed.sql
+!sql/equipment.example.sql
 !sql/migrations/*.sql
 *.sql.gz
 *.dump

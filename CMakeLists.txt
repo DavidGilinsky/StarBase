@@ -111,7 +111,8 @@ if(SB_WITH_DB)
     if(SB_WITH_FITS)
         add_library(sb_index STATIC
             src/index/mapping_loader.cpp
-            src/index/frame_store.cpp)
+            src/index/frame_store.cpp
+            src/index/equipment.cpp)
         target_include_directories(sb_index PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/index)
         target_link_libraries(sb_index PUBLIC sb_db sb_extract)
 
@@ -195,6 +196,10 @@ if(SB_BUILD_TESTS)
             target_link_libraries(scan_test PRIVATE sb_scan ${CFITSIO_LIBRARIES})
             target_include_directories(scan_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
             add_test(NAME scan_test COMMAND scan_test)
+
+            add_executable(equipment_test tests/equipment_test.cpp)
+            target_link_libraries(equipment_test PRIVATE sb_index)
+            add_test(NAME equipment_test COMMAND equipment_test)
         endif()
     endif()
 endif()
@@ -206,7 +211,7 @@ if(SB_WITH_DB)
 endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/starbase.conf.example
         DESTINATION share/starbase)
-install(FILES sql/schema.sql sql/setup.sql sql/seed.sql DESTINATION sql)
+install(FILES sql/schema.sql sql/setup.sql sql/seed.sql sql/equipment.example.sql DESTINATION sql)
 install(DIRECTORY sql/migrations DESTINATION sql OPTIONAL)
 install(DIRECTORY web/ DESTINATION web OPTIONAL)
 install(FILES LICENSE README.md DESTINATION share/doc/starbase)
