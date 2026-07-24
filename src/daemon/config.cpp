@@ -129,6 +129,8 @@ Config Config::load(const std::string& path) {
                 cfg.default_scan_interval_s = to_int(val, where);
             else if (key == "default_settle_seconds")
                 cfg.default_settle_seconds = to_int(val, where);
+            else if (key == "default_ignore_globs")
+                cfg.default_ignore_globs = val;
         } else if (section == "actions") {
             if (key == "staging_root") cfg.staging_root = val;
             else if (key == "trash_root") cfg.trash_root = val;

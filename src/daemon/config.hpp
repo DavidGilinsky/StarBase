@@ -59,6 +59,15 @@ struct Config {
     int default_scan_interval_s = 3600;
     int default_settle_seconds = 30;         // ignore files younger than this
 
+    // Applied to a new root by `add-root`, then editable per root. Covers
+    // partial writes and the debris left by the other things that touch an
+    // archive: Windows/SMB clients (Thumbs.db, desktop.ini, System Volume
+    // Information, $RECYCLE.BIN), macOS (.DS_Store, ._*), and GoodSync
+    // (_gsdata_). Newline or comma separated.
+    std::string default_ignore_globs =
+        "_gsdata_,*.tmp,*.part,*.partial,Thumbs.db,desktop.ini,"
+        "System Volume Information,$RECYCLE.BIN,.DS_Store,._*,.zfs";
+
     // [actions]
     std::string staging_root = "/var/lib/starbase/staging";
     std::string trash_root = "/var/lib/starbase/trash";

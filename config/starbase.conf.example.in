@@ -64,7 +64,17 @@ queue_depth = 4096
 default_scan_interval_s = 3600
 # A file must be untouched this long before it is indexed, so frames still being
 # written are not read half-formed. Local filesystems also use IN_CLOSE_WRITE.
+#
+# Raise this where a capture application writes over SMB from another machine.
+# An SMB client with an opportunistic lock caches data locally, and the server
+# has no way to tell an NFS reader that the file is still in flight, so the
+# settle time is the only thing standing between the scanner and a half-written
+# frame. A 124 MB sub over a busy link takes a while.
 default_settle_seconds = 30
+# Applied to a new root by `add-root`, then editable per root. Covers partial
+# writes and the debris other things leave in an archive: Windows/SMB clients,
+# macOS, and GoodSync staging.
+default_ignore_globs = _gsdata_,*.tmp,*.part,*.partial,Thumbs.db,desktop.ini,System Volume Information,$RECYCLE.BIN,.DS_Store,._*,.zfs
 
 [actions]
 # Where symlink staging trees for the PixInsight/WBPP handoff are built.

@@ -149,6 +149,7 @@ int cmd_add_root(db::Database& d, const starbase::Config& cfg,
     f.watch_mode = watchable ? "auto" : "poll";
     f.scan_interval_s = cfg.default_scan_interval_s;
     f.settle_seconds = cfg.default_settle_seconds;
+    f.ignore_globs = cfg.default_ignore_globs;
 
     const int id = d.add_root(label, path, f);
     std::cout << "added root " << id << ": " << label << " -> " << path << "\n"

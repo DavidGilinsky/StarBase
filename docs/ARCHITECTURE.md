@@ -125,6 +125,38 @@ covers the local case; sweeps require `mtime` older than `settle_seconds`
 that vanish become `status='missing'` and are retained (with `last_seen`) rather
 than deleted, so history and collections do not silently lose members.
 
+### The archive has more than one writer, over more than one protocol
+
+The reference archive is exported **both** as NFS (read by this host) and as SMB,
+which is how N.I.N.A. on the observatory's Windows machine writes frames into
+`incoming/nina`. `incoming/asiair` and `incoming/thesky` receive from the other
+two capture applications, and GoodSync stages through `_gsdata_`. So at any
+moment a frame may be mid-flight from a machine StarBase cannot see, over a
+protocol it is not speaking.
+
+Three consequences, all load-bearing:
+
+1. **The settle gate is not a nicety.** An SMB client holding an opportunistic
+   lock caches writes locally, and the server cannot tell an NFS reader that a
+   file is still in flight. `settle_seconds` is the only thing between the
+   scanner and a half-written 124 MB frame. It should be raised, not lowered, on
+   a root that receives over SMB.
+2. **This is why the dataset is `casesensitivity=insensitive`.** It is a
+   deliberate choice for Windows clients, not an accident, so `case_sensitive`
+   handling is permanent rather than a workaround for one odd dataset.
+3. **Filesystem actions must be conservative.** StarBase cannot see SMB locks.
+   A move or rename of a frame N.I.N.A. still has open would be invisible to the
+   process that owns it. Roots are `writable = false` by default, destructive
+   actions dry-run first, and the action engine only touches files that have
+   been stable well beyond `settle_seconds`.
+
+Default ignore globs therefore cover the debris the other writers leave:
+`Thumbs.db`, `desktop.ini`, `System Volume Information`, `$RECYCLE.BIN`,
+`.DS_Store`, `._*`, `_gsdata_`, and partial-write suffixes. ZFS `snapdir` is
+`hidden`, so `.zfs` does not appear in `readdir` and snapshot trees are not
+walked; `.zfs` is in the ignore list anyway, because that is a configuration
+setting rather than a guarantee.
+
 ## 5. Metadata extraction
 
 **FITS** via **CFITSIO** (`libcfitsio-dev`, already present at 4.3.1). NASA's
