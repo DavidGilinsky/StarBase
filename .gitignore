@@ -1,19 +1,175 @@
-# OS / editor cruft
-.DS_Store
-*~
-*.swp
+# ---------------------------------------------------------------------------
+# Author:        David Gilinsky
+# File:          .gitignore
+# Purpose:       Git ignore rules: build output, packaging artifacts, local
+#                secrets, TLS material, generated PixInsight scripts, and
+#                astronomical image data.
+# Created:       2026-07-23
+# Last Modified: 2026-07-23
+# Version:       0.1.0
+# License:       GPL-3.0-or-later
+# ---------------------------------------------------------------------------
 
-# C / C++ / CMake
+# ---- Build directories ----
 /build/
+/build-*/
+/pkg/
+/out/
+/install/
+obj-*/
+
+# ---- CMake artifacts ----
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+install_manifest.txt
+Testing/
+compile_commands.json
+.cmake/
+
+# ---- Compiled output ----
 *.o
+*.obj
 *.a
 *.so
+*.so.*
+*.dylib
+*.exe
+*.lo
+*.la
+core
+core.*
+*.gcda
+*.gcno
+*.gcov
+/coverage/
 
-# Python
+# ---- Debian packaging ----
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+debian/.debhelper/
+debian/files
+debian/substvars
+debian/*.substvars
+debian/*.log
+debian/*.debhelper
+debian/starbase/
+debian/starbase-*/
+debian/tmp/
+
+# ---- Secrets and local configuration ----
+# The database password lives in SB_DB_PASSWORD, supplied by a root-owned
+# EnvironmentFile. It must never reach the repository.
+*.env
+starbase.env
+*.local.conf
+starbase.local.conf
+secrets/
+.netrc
+
+# ---- TLS material ----
+# Self-signed certificates and private keys are generated at runtime into the
+# systemd StateDirectory. Neither belongs in git, and the key is a secret.
+*.pem
+*.key
+*.crt
+*.csr
+*-cert.pem
+*-key.pem
+tls/
+
+# ---- SQL ----
+# Database dumps and backups contain user password hashes and other secrets, so
+# *.sql is ignored everywhere and only the schema definition files are tracked.
+# NOTE: every tracked .sql file must be whitelisted here explicitly. Adding a
+# new one to sql/ without a matching '!' line will silently exclude it.
+*.sql
+!sql/schema.sql
+!sql/setup.sql
+!sql/seed.sql
+!sql/migrations/*.sql
+*.sql.gz
+*.dump
+
+# ---- Astronomical image data ----
+# A single frame from this observatory is 50-125 MB. Committing one is
+# effectively irreversible in a public repository, so every image format the
+# indexer understands is ignored globally. Test fixtures, if any are ever
+# needed, must be tiny and force-added deliberately.
+*.fits
+*.fit
+*.fts
+*.fits.fz
+*.fz
+*.xisf
+*.xisf.gz
+*.cr2
+*.CR2
+*.nef
+*.NEF
+*.arw
+*.ARW
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+# ...but the web UI's own assets are source and must be tracked.
+!web/**/*.png
+!web/**/*.jpg
+!web/**/*.svg
+!docs/**/*.png
+!docs/**/*.svg
+
+# ---- StarBase runtime output ----
+# Symlink staging trees built for WBPP handoff, generated PJSR scripts, the
+# trash directory used instead of unlink, and exported result sets.
+/staging/
+/trash/
+/var/
+/generated/
+*.wbpp.js
+starbase-launch-*.sh
+/exports/
+
+# ---- Logs and scratch ----
+*.log
+!debian/changelog
+*.pid
+*.sock
+/tmp/
+/scratch/
+test_starbase.conf
+*.orig
+*.rej
+*.bak
+
+# ---- Python (tooling and scripts) ----
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
-# Debian packaging
-*.deb
+# ---- Editor and IDE ----
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.cache/
+*.code-workspace
+
+# ---- Local agent tooling (not shared) ----
+.claude/settings.local.json
+.qodo/
