@@ -98,6 +98,15 @@ if(SB_WITH_DB)
         ${MARIADB_INCLUDE_DIRS})
     target_link_directories(sb_db PUBLIC ${MARIADB_LIBRARY_DIRS})
     target_link_libraries(sb_db PUBLIC sb_core ${MARIADB_LIBRARIES})
+
+    # Bridge between the database and the resolver: loads the header mapping
+    # from the DB, and (later) stores resolved frames. Depends on both layers,
+    # so neither sb_db nor sb_extract has to know about the other.
+    if(SB_WITH_FITS)
+        add_library(sb_index STATIC src/index/mapping_loader.cpp)
+        target_include_directories(sb_index PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/index)
+        target_link_libraries(sb_index PUBLIC sb_db sb_extract)
+    endif()
 endif()
 
 # ---- starbased daemon ----
@@ -156,6 +165,14 @@ if(SB_BUILD_TESTS)
         add_executable(db_test tests/db_test.cpp)
         target_link_libraries(db_test PRIVATE sb_db)
         add_test(NAME db_test COMMAND db_test)
+
+        if(SB_WITH_FITS)
+            # Also DB-gated: loads seed.sql and checks the DB mapping matches the
+            # compiled-in defaults, catching drift between the two.
+            add_executable(mapping_test tests/mapping_test.cpp)
+            target_link_libraries(mapping_test PRIVATE sb_index)
+            add_test(NAME mapping_test COMMAND mapping_test)
+        endif()
     endif()
 endif()
 

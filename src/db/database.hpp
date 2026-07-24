@@ -86,6 +86,13 @@ public:
     // produced by the code, never taken from user strings.
     std::string escape(const std::string& s) const;
 
+    // One result row: a NULL column is an empty optional.
+    using Row = std::vector<std::optional<std::string>>;
+
+    // Run a SELECT and return its rows. For STATIC queries only -- callers pass
+    // literal SQL, never interpolated user input. Throws DbError on failure.
+    std::vector<Row> query(const std::string& sql);
+
     // ---- Schema ----
 
     // Execute a multi-statement .sql file (schema.sql, seed.sql, a migration).

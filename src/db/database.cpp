@@ -113,6 +113,30 @@ int Database::apply_script(const std::string& path) {
     return statements;
 }
 
+std::vector<Database::Row> Database::query(const std::string& sql) {
+    if (mysql_real_query(impl_->conn, sql.c_str(), sql.size()) != 0)
+        throw DbError(std::string("query: ") + mysql_error(impl_->conn));
+    MYSQL_RES* res = mysql_store_result(impl_->conn);
+    std::vector<Row> rows;
+    if (res) {
+        const unsigned int ncols = mysql_num_fields(res);
+        while (MYSQL_ROW row = mysql_fetch_row(res)) {
+            const unsigned long* lens = mysql_fetch_lengths(res);
+            Row out;
+            out.reserve(ncols);
+            for (unsigned int c = 0; c < ncols; ++c) {
+                if (row[c]) out.emplace_back(std::string(row[c], lens[c]));
+                else out.emplace_back(std::nullopt);
+            }
+            rows.push_back(std::move(out));
+        }
+        mysql_free_result(res);
+    } else if (mysql_field_count(impl_->conn) != 0) {
+        throw DbError(std::string("query (result fetch): ") + mysql_error(impl_->conn));
+    }
+    return rows;
+}
+
 bool Database::table_exists(const std::string& name) {
     const std::string q =
         "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() "
