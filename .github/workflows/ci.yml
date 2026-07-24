@@ -1,0 +1,101 @@
+# ---------------------------------------------------------------------------
+# Author:        David Gilinsky
+# File:          .github/workflows/ci.yml
+# Purpose:       GitHub Actions CI: build and test on amd64, and load the SQL
+#                schema and seed against a real MariaDB service.
+# Created:       2026-07-23
+# Last Modified: 2026-07-23
+# Version:       0.1.0
+# License:       GPL-3.0-or-later
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    name: Build & test (amd64)
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: starbase
+          MARIADB_USER: starbase
+          MARIADB_PASSWORD: starbase
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libmariadb-dev libcfitsio-dev libssl-dev mariadb-client
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Load schema
+        run: mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase < sql/schema.sql
+
+      # The schema must be safe to re-run: the daemon's db/init endpoint and the
+      # package postinst both apply it to an existing database.
+      - name: Schema is idempotent
+        run: mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase < sql/schema.sql
+
+      - name: Load seed data
+        run: mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase < sql/seed.sql
+
+      - name: Seed is idempotent
+        run: mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase < sql/seed.sql
+
+      # Guards the trap that every tracked .sql file must be whitelisted in
+      # .gitignore; a new one added without a '!' line would silently vanish.
+      - name: All sql/ files are tracked
+        run: |
+          missing=0
+          for f in sql/*.sql; do
+            git ls-files --error-unmatch "$f" >/dev/null 2>&1 || { echo "UNTRACKED: $f"; missing=1; }
+          done
+          exit $missing
+
+      - name: Verify schema objects
+        run: |
+          mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase -N -B -e "
+            SELECT CONCAT('tables=', COUNT(*)) FROM information_schema.tables
+              WHERE table_schema='starbase' AND table_type='BASE TABLE';
+            SELECT CONCAT('views=', COUNT(*)) FROM information_schema.views
+              WHERE table_schema='starbase';
+            SELECT CONCAT('header_map=', COUNT(*)) FROM header_map;
+            SELECT CONCAT('calibration_rules=', COUNT(*)) FROM calibration_rules;"
+
+      - name: Calibration rules contain valid JSON
+        run: |
+          bad=$(mariadb -h 127.0.0.1 -P 3306 -u starbase -pstarbase starbase -N -B -e \
+            "SELECT COUNT(*) FROM calibration_rules WHERE JSON_VALID(match_json)=0;")
+          echo "invalid match_json rows: $bad"
+          [ "$bad" = "0" ]
+
+      - name: Smoke-test binaries
+        run: |
+          ./build/starbased --version
+          ./build/starbasectl version
+          ./build/starbasectl --help >/dev/null

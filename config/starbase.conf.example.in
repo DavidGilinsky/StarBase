@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------------------
+# Author:        David Gilinsky
+# File:          config/starbase.conf.example.in
+# Purpose:       Example daemon configuration. `@CMAKE_INSTALL_PREFIX@` is
+#                substituted at build time; the .deb seeds a copy at
+#                /etc/starbase/starbase.conf.
+# Created:       2026-07-23
+# Last Modified: 2026-07-23
+# Version:       0.1.0
+# License:       GPL-3.0-or-later
+# ---------------------------------------------------------------------------
+# StarBase daemon configuration (INI-style).
+# Copy to /etc/starbase/starbase.conf and edit for your site.
+#
+# Monitored trees are NOT listed here. Register them with
+# `starbasectl add-root <label> <path>` or from the web UI, so roots can be
+# added, disabled, or rescanned without restarting the daemon.
+
+[daemon]
+# debug | info | warning | error
+log_level = info
+
+[database]
+# host may be a hostname or IP, and may carry a ":PORT" suffix which overrides
+# the separate `port` below. StarBase uses its own `starbase` database; it can
+# share a MariaDB instance with NightWatcher2 but shares no tables with it.
+host = 127.0.0.1
+port = 3306
+name = starbase
+user = starbase
+# The database password is read from the environment variable SB_DB_PASSWORD.
+# Never store secrets in this file or commit them to git. The daemon refuses to
+# start if a `password` key appears here.
+
+[api]
+# Built-in HTTP server (REST API + web UI).
+bind = 127.0.0.1
+port = 8080
+# Serve over HTTPS. When on and no certificate exists, a self-signed pair is
+# generated at the paths below. Bound off localhost, ALL requests (reads
+# included) require a login or an SB_API_TOKEN.
+tls = off
+# TLS material lives in the systemd StateDirectory (/var/lib/starbase), which
+# stays writable under ProtectSystem=strict.
+tls_cert = /var/lib/starbase/starbase-cert.pem
+tls_key = /var/lib/starbase/starbase-key.pem
+schema_file = @CMAKE_INSTALL_PREFIX@/sql/schema.sql
+seed_file = @CMAKE_INSTALL_PREFIX@/sql/seed.sql
+web_root = @CMAKE_INSTALL_PREFIX@/web
+
+[scanner]
+# 0 = choose at runtime from hardware_concurrency. On an NFS archive the useful
+# parallelism is bounded by RPC concurrency rather than CPU, so raising this
+# past the client's connection capacity buys nothing. If the archive is on NFS,
+# check that `nconnect` is actually in effect: the first mount to a given server
+# fixes the connection count for every later mount to that server, so an
+# unrelated mount without nconnect will silently cap all of them at one.
+threads = 0
+# Bounded work queue between the directory walker and the header extractors.
+# Keeps memory flat on a tree with millions of files.
+queue_depth = 4096
+# Default per-root sweep interval. The scheduled sweep is authoritative;
+# inotify, where available, only makes discovery prompt.
+default_scan_interval_s = 3600
+# A file must be untouched this long before it is indexed, so frames still being
+# written are not read half-formed. Local filesystems also use IN_CLOSE_WRITE.
+default_settle_seconds = 30
+
+[actions]
+# Where symlink staging trees for the PixInsight/WBPP handoff are built.
+staging_root = /var/lib/starbase/staging
+# Deletes move here instead of calling unlink(2). Nothing is ever removed
+# outright by an action.
+trash_root = /var/lib/starbase/trash
+# symlink | hardlink | copy. Hardlinks need the staging root on the same
+# filesystem as the archive; copy duplicates the data.
+link_mode = symlink
+
+[pixinsight]
+# Used for the WBPP handoff. WBPP ships a command-line automation mode; StarBase
+# builds a staging tree and invokes it, so no PixInsight code is linked or
+# vendored (PJSR is PCL-licensed, not GPL).
+binary = /opt/PixInsight/bin/PixInsight.sh
+wbpp_script = /opt/PixInsight/src/scripts/BatchPreprocessing/WBPP.js

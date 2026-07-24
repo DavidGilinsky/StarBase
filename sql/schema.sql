@@ -227,6 +227,13 @@ CREATE TABLE IF NOT EXISTS roots (
     enabled           TINYINT(1)    NOT NULL DEFAULT 1,
     writable          TINYINT(1)    NOT NULL DEFAULT 0,  -- gate on destructive actions
     watch_mode        ENUM('auto','inotify','poll','off') NOT NULL DEFAULT 'auto',
+    -- Whether this root's filesystem distinguishes case. The reference archive
+    -- lives on a ZFS dataset created with casesensitivity=insensitive, where
+    -- 'Lights/M31' and 'lights/M31' are the same directory. rel_path_hash is
+    -- computed over the raw string and would therefore produce two rows for one
+    -- file; when this is 0 the scanner case-folds the path before hashing.
+    -- Detected at scan time, overridable here.
+    case_sensitive    TINYINT(1)    NOT NULL DEFAULT 1,
     scan_interval_s   INT           NOT NULL DEFAULT 3600,
     settle_seconds    INT           NOT NULL DEFAULT 30,  -- ignore files younger than this
     ignore_globs      TEXT          NULL,       -- newline separated; default: _gsdata_, *.tmp, *.part

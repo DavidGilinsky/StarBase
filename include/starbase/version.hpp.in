@@ -1,0 +1,17 @@
+// ---------------------------------------------------------------------------
+// Author:        David Gilinsky
+// File:          include/starbase/version.hpp.in
+// Purpose:       CMake-configured template for the project version header.
+// Created:       2026-07-23
+// Last Modified: 2026-07-23
+// Version:       0.1.0
+// License:       GPL-3.0-or-later
+// ---------------------------------------------------------------------------
+#pragma once
+// This header is generated from version.hpp.in by CMake (configure_file).
+// Do not edit the generated copy under the build directory.
+
+#define STARBASE_VERSION       "@PROJECT_VERSION@"
+#define STARBASE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define STARBASE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define STARBASE_VERSION_PATCH @PROJECT_VERSION_PATCH@
