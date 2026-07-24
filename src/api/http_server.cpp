@@ -22,6 +22,7 @@
 #include "mapping_loader.hpp"
 #include "scanner.hpp"
 #include "starbase/version.hpp"
+#include "tls_cert.hpp"
 
 namespace starbase::api {
 namespace {
@@ -71,7 +72,9 @@ long qint(const httplib::Request& req, const char* key, long def, long lo, long 
 
 struct HttpServer::Impl {
     ApiConfig cfg;
-    httplib::Server server;
+    // Plain Server or SSLServer, chosen at start() and held by base pointer so
+    // route setup is identical either way.
+    std::unique_ptr<httplib::Server> server;
     std::thread thread;
 
     explicit Impl(ApiConfig c) : cfg(std::move(c)) {}
@@ -90,10 +93,10 @@ struct HttpServer::Impl {
 };
 
 void HttpServer::Impl::routes() {
-    server.set_default_headers({{"Access-Control-Allow-Origin", "*"}});
+    server->set_default_headers({{"Access-Control-Allow-Origin", "*"}});
 
     // ---- GET /api/v1/status ----
-    server.Get("/api/v1/status", [this](const httplib::Request&, httplib::Response& res) {
+    server->Get("/api/v1/status", [this](const httplib::Request&, httplib::Response& res) {
         try {
             auto d = db();
             json j;
@@ -117,7 +120,7 @@ void HttpServer::Impl::routes() {
     });
 
     // ---- GET /api/v1/roots ----
-    server.Get("/api/v1/roots", [this](const httplib::Request&, httplib::Response& res) {
+    server->Get("/api/v1/roots", [this](const httplib::Request&, httplib::Response& res) {
         try {
             auto d = db();
             const std::vector<std::string> cols = {"id",       "label",     "path",
@@ -133,7 +136,7 @@ void HttpServer::Impl::routes() {
     });
 
     // ---- GET /api/v1/frames  (paginated, filtered browse) ----
-    server.Get("/api/v1/frames", [this](const httplib::Request& req, httplib::Response& res) {
+    server->Get("/api/v1/frames", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             auto d = db();
             const long limit = qint(req, "limit", 50, 1, 500);
@@ -183,7 +186,7 @@ void HttpServer::Impl::routes() {
     });
 
     // ---- GET /api/v1/frames/:id  (detail + full header) ----
-    server.Get(R"(/api/v1/frames/(\d+))", [this](const httplib::Request& req,
+    server->Get(R"(/api/v1/frames/(\d+))", [this](const httplib::Request& req,
                                                  httplib::Response& res) {
         try {
             auto d = db();
@@ -210,7 +213,7 @@ void HttpServer::Impl::routes() {
     });
 
     // ---- GET /api/v1/summary  (dashboard aggregates) ----
-    server.Get("/api/v1/summary", [this](const httplib::Request& req, httplib::Response& res) {
+    server->Get("/api/v1/summary", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             auto d = db();
             const std::string by = req.has_param("by") ? req.get_param_value("by") : "object";
@@ -231,7 +234,7 @@ void HttpServer::Impl::routes() {
     });
 
     // ---- POST /api/v1/scan  (write; token-gated) ----
-    server.Post("/api/v1/scan", [this](const httplib::Request& req, httplib::Response& res) {
+    server->Post("/api/v1/scan", [this](const httplib::Request& req, httplib::Response& res) {
         if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
         try {
             auto d = db();
@@ -269,7 +272,7 @@ void HttpServer::Impl::routes() {
 
     // ---- static web UI at / ----
     if (!cfg.web_root.empty()) {
-        server.set_mount_point("/", cfg.web_root);
+        server->set_mount_point("/", cfg.web_root);
     }
 }
 
@@ -277,20 +280,42 @@ HttpServer::HttpServer(ApiConfig cfg) : impl_(std::make_unique<Impl>(std::move(c
 HttpServer::~HttpServer() { stop(); }
 
 void HttpServer::start() {
-    impl_->routes();
     const std::string bind = impl_->cfg.bind;
     const int port = impl_->cfg.port;
 
-    if (!impl_->server.bind_to_port(bind.c_str(), port))
+    // Decide HTTP vs HTTPS. TLS needs both a cert and a key path; when enabled
+    // and either is missing, a self-signed pair is generated (SANs cover
+    // localhost + 127.0.0.1), so the operator gets working HTTPS out of the box.
+    bool tls = impl_->cfg.tls && !impl_->cfg.tls_cert.empty() && !impl_->cfg.tls_key.empty();
+    if (tls) {
+        std::string info;
+        if (!ensure_self_signed_cert(impl_->cfg.tls_cert, impl_->cfg.tls_key, "starbase", info))
+            throw std::runtime_error("TLS enabled but no usable certificate: " + info);
+        starbase::log_info("TLS: " + info);
+        auto ssl = std::make_unique<httplib::SSLServer>(impl_->cfg.tls_cert.c_str(),
+                                                        impl_->cfg.tls_key.c_str());
+        if (!ssl->is_valid())
+            throw std::runtime_error("TLS certificate/key invalid or unreadable (" +
+                                     impl_->cfg.tls_cert + ", " + impl_->cfg.tls_key + ")");
+        impl_->server = std::move(ssl);
+    } else {
+        if (impl_->cfg.tls)
+            starbase::log_warn("tls=on but no tls_cert/tls_key configured; serving plain HTTP");
+        impl_->server = std::make_unique<httplib::Server>();
+    }
+
+    impl_->routes();
+    if (!impl_->server->bind_to_port(bind.c_str(), port))
         throw std::runtime_error("cannot bind API to " + bind + ":" + std::to_string(port) +
                                  " (in use?)");
-    impl_->thread = std::thread([this] { impl_->server.listen_after_bind(); });
-    starbase::log_info("API listening on http://" + bind + ":" + std::to_string(port) +
+    impl_->thread = std::thread([this] { impl_->server->listen_after_bind(); });
+    const std::string scheme = tls ? "https" : "http";
+    starbase::log_info("API listening on " + scheme + "://" + bind + ":" + std::to_string(port) +
                        (impl_->cfg.web_root.empty() ? "" : " (web UI at /)"));
 }
 
 void HttpServer::stop() {
-    if (impl_ && impl_->server.is_running()) impl_->server.stop();
+    if (impl_ && impl_->server && impl_->server->is_running()) impl_->server->stop();
     if (impl_ && impl_->thread.joinable()) impl_->thread.join();
 }
 

@@ -32,7 +32,8 @@ CREATE USER IF NOT EXISTS 'starbase'@'localhost'
 -- Uncomment to allow the daemon to run on a different host from the database.
 -- CREATE USER IF NOT EXISTS 'starbase'@'%' IDENTIFIED BY 'changeme';
 
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, REFERENCES
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, REFERENCES,
+    CREATE VIEW, SHOW VIEW
     ON starbase.* TO 'starbase'@'localhost';
 
 -- StarBase reads NightWatcher2's sky-brightness readings when the operator opts

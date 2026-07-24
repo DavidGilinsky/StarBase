@@ -129,6 +129,9 @@ int main(int argc, char** argv) {
         api.bind = cfg.api_bind;
         api.port = cfg.api_port;
         api.web_root = cfg.web_root;
+        api.tls = cfg.api_tls;
+        api.tls_cert = cfg.api_tls_cert;
+        api.tls_key = cfg.api_tls_key;
         api.schema_file = cfg.schema_file;
         api.seed_file = cfg.seed_file;
         api.db.host = cfg.db_host;

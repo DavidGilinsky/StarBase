@@ -26,6 +26,12 @@ struct ApiConfig {
     // a write requires the X-SB-Token header (or ?token=). Empty leaves writes
     // open, which is only safe on a localhost bind.
     std::string token;
+    // Serve HTTPS. When true, a self-signed cert/key is generated at the paths
+    // below if missing (browsers show a one-time warning). Empty paths with
+    // tls=true fall back to plain HTTP.
+    bool tls = false;
+    std::string tls_cert;
+    std::string tls_key;
     db::DbConfig db;             // handlers open their own connection from this
     std::string schema_file;     // for POST /api/v1/db/init (optional)
     std::string seed_file;

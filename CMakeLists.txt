@@ -126,12 +126,13 @@ if(SB_WITH_DB)
         target_include_directories(sb_httplib SYSTEM INTERFACE
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
-        target_link_libraries(sb_httplib INTERFACE Threads::Threads)
+        target_compile_definitions(sb_httplib INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
+        target_link_libraries(sb_httplib INTERFACE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
-        # Embedded HTTP/JSON API and static web UI.
-        add_library(sb_api STATIC src/api/http_server.cpp)
+        # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
+        add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_httplib)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
