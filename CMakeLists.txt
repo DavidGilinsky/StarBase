@@ -109,7 +109,9 @@ if(SB_WITH_DB)
     # from the DB, and (later) stores resolved frames. Depends on both layers,
     # so neither sb_db nor sb_extract has to know about the other.
     if(SB_WITH_FITS)
-        add_library(sb_index STATIC src/index/mapping_loader.cpp)
+        add_library(sb_index STATIC
+            src/index/mapping_loader.cpp
+            src/index/frame_store.cpp)
         target_include_directories(sb_index PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/index)
         target_link_libraries(sb_index PUBLIC sb_db sb_extract)
     endif()
@@ -178,6 +180,11 @@ if(SB_BUILD_TESTS)
             add_executable(mapping_test tests/mapping_test.cpp)
             target_link_libraries(mapping_test PRIVATE sb_index)
             add_test(NAME mapping_test COMMAND mapping_test)
+
+            add_executable(index_test tests/index_test.cpp)
+            target_link_libraries(index_test PRIVATE sb_index ${CFITSIO_LIBRARIES})
+            target_include_directories(index_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
+            add_test(NAME index_test COMMAND index_test)
         endif()
     endif()
 endif()

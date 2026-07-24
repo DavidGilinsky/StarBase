@@ -137,6 +137,16 @@ std::vector<Database::Row> Database::query(const std::string& sql) {
     return rows;
 }
 
+long long Database::exec(const std::string& sql) {
+    if (mysql_real_query(impl_->conn, sql.c_str(), sql.size()) != 0)
+        throw DbError(std::string("exec: ") + mysql_error(impl_->conn));
+    return static_cast<long long>(mysql_insert_id(impl_->conn));
+}
+
+long long Database::affected_rows() const {
+    return static_cast<long long>(mysql_affected_rows(impl_->conn));
+}
+
 bool Database::table_exists(const std::string& name) {
     const std::string q =
         "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() "

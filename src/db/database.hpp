@@ -93,6 +93,14 @@ public:
     // literal SQL, never interpolated user input. Throws DbError on failure.
     std::vector<Row> query(const std::string& sql);
 
+    // Run an INSERT/UPDATE/DELETE. Returns the AUTO_INCREMENT id of an INSERT
+    // (0 if none). String inputs must already be escape()d by the caller.
+    // Throws DbError on failure.
+    long long exec(const std::string& sql);
+
+    // Rows changed by the last exec().
+    long long affected_rows() const;
+
     // ---- Schema ----
 
     // Execute a multi-statement .sql file (schema.sql, seed.sql, a migration).
