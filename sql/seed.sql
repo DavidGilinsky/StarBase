@@ -17,8 +17,9 @@
 -- /astronomy/astro-imaging: 103 files sampled for keyword vocabulary and 4,000
 -- for coverage. Percentages in comments are observed presence in that sample,
 -- across N.I.N.A. 3.2, TheSky 10.5, ASIAIR, and PixInsight-written masters.
-
-USE starbase;
+--
+-- As with schema.sql, there is deliberately no `USE <database>` here: the
+-- target is whatever database the connection already selected.
 
 -- ---------------------------------------------------------------------------
 -- Keyword priority. Lower priority wins.

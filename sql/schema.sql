@@ -23,8 +23,11 @@
 --   * Sizing note: the reference archive is ~8.4 TB of mostly 62 MP frames,
 --     which is on the order of 70k frames and ~7M header cards. Everything
 --     here is sized for InnoDB comfortably handling 10x that.
-
-USE starbase;
+--
+-- Deliberately no `USE <database>` statement: the target is whatever database
+-- the connection already selected. Hardcoding the name would stop this schema
+-- from being applied to a database called anything else, which breaks testing
+-- against a scratch database and prevents anyone running two instances.
 
 -- ---------------------------------------------------------------------------
 -- Schema versioning

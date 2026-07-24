@@ -50,38 +50,53 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/generated/starbase/version.hpp
     @ONLY)
 
-# ---- Core library (config + logging; shared by the daemon, CLI, and tests) ----
+# ---- Core library (config, logging, filesystem probing) ----
 add_library(sb_core STATIC
     src/daemon/config.cpp
-    src/daemon/logging.cpp)
+    src/daemon/logging.cpp
+    src/util/fsinfo.cpp)
 target_include_directories(sb_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/daemon
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/util
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(sb_core PUBLIC sb_warnings Threads::Threads)
+
+# ---- Optional dependency probing ----
+if(SB_WITH_DB OR SB_WITH_FITS)
+    find_package(PkgConfig REQUIRED)
+endif()
+if(SB_WITH_FITS)
+    # Probed ahead of the extractor (M2) so a build host missing the dependency
+    # fails at configure time rather than a milestone later.
+    pkg_check_modules(CFITSIO REQUIRED cfitsio)
+    message(STATUS "CFITSIO: ${CFITSIO_VERSION}")
+endif()
+
+# ---- Database layer (requires libmariadb-dev) ----
+if(SB_WITH_DB)
+    pkg_check_modules(MARIADB REQUIRED libmariadb)
+    find_package(OpenSSL REQUIRED)
+    message(STATUS "MariaDB Connector/C: ${MARIADB_VERSION}")
+
+    add_library(sb_db STATIC src/db/database.cpp)
+    target_include_directories(sb_db PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/db
+        ${MARIADB_INCLUDE_DIRS})
+    target_link_directories(sb_db PUBLIC ${MARIADB_LIBRARY_DIRS})
+    target_link_libraries(sb_db PUBLIC sb_core ${MARIADB_LIBRARIES})
+endif()
 
 # ---- starbased daemon ----
 add_executable(starbased src/daemon/main.cpp)
 target_link_libraries(starbased PRIVATE sb_core)
 
 # ---- starbasectl CLI ----
-add_executable(starbasectl src/cli/starbasectl.cpp)
-target_link_libraries(starbasectl PRIVATE sb_core)
-
-# ---- Optional dependency probing ----
-# Probed at M0 so a misconfigured build host fails at configure time rather than
-# three milestones later. Nothing links against them yet.
-if(SB_WITH_DB OR SB_WITH_FITS)
-    find_package(PkgConfig REQUIRED)
-endif()
+# Every command it offers talks to the database, so it is only built with the
+# database layer. A -DSB_WITH_DB=OFF build still produces a working daemon.
 if(SB_WITH_DB)
-    pkg_check_modules(MARIADB REQUIRED libmariadb)
-    find_package(OpenSSL REQUIRED)
-    message(STATUS "MariaDB Connector/C: ${MARIADB_VERSION}")
-endif()
-if(SB_WITH_FITS)
-    pkg_check_modules(CFITSIO REQUIRED cfitsio)
-    message(STATUS "CFITSIO: ${CFITSIO_VERSION}")
+    add_executable(starbasectl src/cli/starbasectl.cpp)
+    target_link_libraries(starbasectl PRIVATE sb_db)
 endif()
 
 # ---- Generated example configuration ----
@@ -93,13 +108,29 @@ configure_file(
 # ---- Tests ----
 if(SB_BUILD_TESTS)
     enable_testing()
+
     add_executable(config_test tests/config_test.cpp)
     target_link_libraries(config_test PRIVATE sb_core)
     add_test(NAME config_test COMMAND config_test)
+
+    add_executable(fsinfo_test tests/fsinfo_test.cpp)
+    target_link_libraries(fsinfo_test PRIVATE sb_core)
+    add_test(NAME fsinfo_test COMMAND fsinfo_test)
+
+    if(SB_WITH_DB)
+        # Skips itself (exit 0) unless SB_TEST_DB_NAME is set, so `ctest` is
+        # useful on a machine with no database while CI still exercises it.
+        add_executable(db_test tests/db_test.cpp)
+        target_link_libraries(db_test PRIVATE sb_db)
+        add_test(NAME db_test COMMAND db_test)
+    endif()
 endif()
 
 # ---- Install ----
-install(TARGETS starbased starbasectl RUNTIME DESTINATION bin)
+install(TARGETS starbased RUNTIME DESTINATION bin)
+if(SB_WITH_DB)
+    install(TARGETS starbasectl RUNTIME DESTINATION bin)
+endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/starbase.conf.example
         DESTINATION share/starbase)
 install(FILES sql/schema.sql sql/setup.sql sql/seed.sql DESTINATION sql)

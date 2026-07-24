@@ -50,7 +50,15 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Unit tests
+      # db_test skips itself unless SB_TEST_DB_NAME is set, so this run covers
+      # the database layer against a real server rather than a mock.
+      - name: Unit and integration tests
+        env:
+          SB_DB_HOST: 127.0.0.1
+          SB_DB_PORT: "3306"
+          SB_DB_USER: starbase
+          SB_DB_PASSWORD: starbase
+          SB_TEST_DB_NAME: starbase
         run: ctest --test-dir build --output-on-failure
 
       - name: Load schema
