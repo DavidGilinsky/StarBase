@@ -688,19 +688,29 @@ PixInsight Core 1.9.4 with WBPP 3.0.1 at `/opt/PixInsight`.
 
 ## 14. Milestones
 
-| # | Deliverable |
-| --- | --- |
-| M0 | Skeleton: CMake, CI, GPL-3.0 license, file headers, `starbased` stub |
-| M1 | Schema + `sb_db` + `starbasectl db-init` / `add-root` |
-| M2 | FITS extractor + header mapping + single-threaded walk |
-| M3 | Threaded sweep + change detection + move survival + inotify |
-| M4 | HTTP API + auth + minimal web UI (browse, frame detail) |
-| M5 | Filter AST query builder + saved queries |
-| M6 | Calibration matcher with explanations |
-| M7 | Action engine: staging tree, exports, fsops with dry-run |
-| M8 | PixInsight bridge: CLI automation, `loadOnly`, REST pull, PJSR helper |
-| M9 | XISF + sidecars |
-| M10 | Packaging (`.deb`, debconf, systemd), docs, public repo |
+All complete (M0–M10).
+
+| # | Deliverable | Status |
+| --- | --- | --- |
+| M0 | Skeleton: CMake, CI, GPL-3.0 license, file headers, `starbased` stub | done |
+| M1 | Schema + `sb_db` + `starbasectl db-init` / `add-root` | done |
+| M2 | FITS extractor + header mapping + single-threaded walk | done |
+| M3 | Threaded sweep + change detection + move survival + inotify | done |
+| M4 | HTTP API + auth + minimal web UI (browse, frame detail) | done |
+| M5 | Filter AST query builder + saved queries | done |
+| M6 | Calibration matcher with explanations | done |
+| M7 | Action engine: staging tree, exports, fsops with dry-run | done |
+| M8 | PixInsight bridge: CLI automation, `loadOnly`, REST pull, PJSR helper | done |
+| M9 | XISF + sidecars | done |
+| M10 | Packaging (`.deb`, debconf, systemd), docs, public repo | done |
+
+Built beyond the original milestone list, as the web UI was fleshed out: the
+full nine-tab SPA (Query builder, Actions bar, Jobs, Roots & Settings, Tags &
+Collections, Database, Users with PBKDF2 login/roles, and the Server tab that
+rebinds the listener live), tag/collection membership in the query engine,
+target-name canonicalization with optional CDS Sesame, and a startup schema
+bootstrap so a fresh database and existing databases both come up without a
+manual migration step.
 
 M1–M4 is the smallest thing that is already useful: a searchable index with a
 web UI. M7–M8 is where it starts replacing manual work.
