@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -1415,6 +1416,142 @@ void HttpServer::Impl::routes() {
             send_json(res, json{{"dry_run", dry}, {"total_frames", total}, {"changes", changes}});
         } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Equipment builder: rigs from camera + focal-length combinations ----
+    // Cameras and filters auto-create during a scan; rigs do not (they pair a
+    // camera with a focal range). This suggests rig definitions from the
+    // combinations actually present, and creating one back-fills rig_id.
+    server->Get("/api/v1/equipment", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            auto camrows = d.query("SELECT c.id, c.model, "
+                "(SELECT COUNT(*) FROM frames f WHERE f.camera_id = c.id) FROM cameras c ORDER BY c.model");
+            auto trows = d.query("SELECT id, name FROM telescopes ORDER BY name");
+            auto rrows = d.query(
+                "SELECT r.id, r.name, r.camera_id, c.model, t.name, r.focal_min_mm, r.focal_max_mm, "
+                "(SELECT COUNT(*) FROM frames f WHERE f.rig_id = r.id) FROM rigs r "
+                "JOIN cameras c ON c.id = r.camera_id LEFT JOIN telescopes t ON t.id = r.telescope_id "
+                "ORDER BY r.name");
+            // Existing rig ranges, to skip already-covered clusters.
+            struct Range { long long cam; double lo, hi; };
+            std::vector<Range> covered;
+            for (const auto& r : rrows)
+                if (r[2] && r[5] && r[6]) covered.push_back({std::stoll(*r[2]), std::stod(*r[5]), std::stod(*r[6])});
+
+            // Distinct camera+focal counts, clustered per camera within ~2%.
+            auto frows = d.query(
+                "SELECT f.camera_id, c.model, f.focal_len_mm, COUNT(*) FROM frames f "
+                "JOIN cameras c ON c.id = f.camera_id WHERE f.camera_id IS NOT NULL "
+                "AND f.focal_len_mm IS NOT NULL GROUP BY f.camera_id, f.focal_len_mm "
+                "ORDER BY f.camera_id, f.focal_len_mm");
+            json suggestions = json::array();
+            size_t i = 0;
+            while (i < frows.size()) {
+                if (!frows[i][0] || !frows[i][2]) { ++i; continue; }
+                const long long cam = std::stoll(*frows[i][0]);
+                const std::string model = frows[i][1] ? *frows[i][1] : "";
+                double lo = std::stod(*frows[i][2]), hi = lo;
+                long long cnt = frows[i][3] ? std::stoll(*frows[i][3]) : 0;
+                size_t j = i + 1;
+                while (j < frows.size() && frows[j][0] && std::stoll(*frows[j][0]) == cam && frows[j][2]) {
+                    const double fl = std::stod(*frows[j][2]);
+                    if (fl <= hi * 1.02) { hi = fl; cnt += frows[j][3] ? std::stoll(*frows[j][3]) : 0; ++j; }
+                    else break;
+                }
+                bool cov = false;
+                for (const auto& rg : covered)
+                    if (rg.cam == cam && !(hi < rg.lo || lo > rg.hi)) { cov = true; break; }
+                if (!cov)
+                    suggestions.push_back({{"camera_id", cam}, {"camera", model},
+                        {"focal_min", lo}, {"focal_max", hi}, {"frames", cnt},
+                        {"suggest_min", std::floor(lo - std::max(lo * 0.015, 1.0))},
+                        {"suggest_max", std::ceil(hi + std::max(hi * 0.015, 1.0))}});
+                i = j;
+            }
+            send_json(res, json{
+                {"cameras", rows_to_json(camrows, {"id", "model", "frames"})},
+                {"telescopes", rows_to_json(trows, {"id", "name"})},
+                {"rigs", rows_to_json(rrows, {"id", "name", "camera_id", "camera", "telescope",
+                                              "focal_min_mm", "focal_max_mm", "frames"})},
+                {"suggestions", suggestions}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Post("/api/v1/equipment/rigs", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            const std::string name = body.value("name", "");
+            const long long cam = body.value("camera_id", 0LL);
+            const double fmin = body.value("focal_min_mm", 0.0), fmax = body.value("focal_max_mm", 0.0);
+            if (name.empty() || cam <= 0) { send_error(res, 400, "name and camera_id are required"); return; }
+            if (fmin <= 0 || fmax < fmin) { send_error(res, 400, "focal range is invalid"); return; }
+            auto d = db();
+            std::string tel = "NULL";
+            if (body.contains("telescope") && body["telescope"].is_string() && !body["telescope"].get<std::string>().empty()) {
+                const std::string tn = body["telescope"].get<std::string>();
+                d.exec("INSERT IGNORE INTO telescopes (name) VALUES ('" + d.escape(tn) + "')");
+                auto tr = d.query("SELECT id FROM telescopes WHERE name = '" + d.escape(tn) + "'");
+                if (!tr.empty() && tr[0][0]) tel = *tr[0][0];
+            }
+            long long rig_id;
+            try {
+                rig_id = d.exec("INSERT INTO rigs (name, camera_id, telescope_id, focal_min_mm, focal_max_mm) "
+                                "VALUES ('" + d.escape(name) + "', " + std::to_string(cam) + ", " + tel + ", " +
+                                std::to_string(fmin) + ", " + std::to_string(fmax) + ")");
+            } catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
+            d.exec("UPDATE frames SET rig_id = " + std::to_string(rig_id) + " WHERE camera_id = " +
+                   std::to_string(cam) + " AND focal_len_mm BETWEEN " + std::to_string(fmin) +
+                   " AND " + std::to_string(fmax));
+            send_json(res, json{{"id", rig_id}, {"name", name}, {"assigned", d.affected_rows()}}, 201);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Patch(R"(/api/v1/equipment/rigs/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            const std::string id = std::string(req.matches[1]);
+            json body = json::parse(req.body);
+            auto d = db();
+            auto cur = d.query("SELECT camera_id, focal_min_mm, focal_max_mm FROM rigs WHERE id = " + id);
+            if (cur.empty()) { send_error(res, 404, "no such rig"); return; }
+            std::vector<std::string> sets;
+            if (body.contains("name")) sets.push_back("name = '" + d.escape(body["name"].get<std::string>()) + "'");
+            bool range_changed = false;
+            double fmin = cur[0][1] ? std::stod(*cur[0][1]) : 0, fmax = cur[0][2] ? std::stod(*cur[0][2]) : 0;
+            if (body.contains("focal_min_mm")) { fmin = body["focal_min_mm"].get<double>(); sets.push_back("focal_min_mm = " + std::to_string(fmin)); range_changed = true; }
+            if (body.contains("focal_max_mm")) { fmax = body["focal_max_mm"].get<double>(); sets.push_back("focal_max_mm = " + std::to_string(fmax)); range_changed = true; }
+            if (fmax < fmin) { send_error(res, 400, "focal range is invalid"); return; }
+            if (sets.empty()) { send_error(res, 400, "nothing to update"); return; }
+            std::string sql = "UPDATE rigs SET ";
+            for (size_t i = 0; i < sets.size(); ++i) sql += (i ? ", " : "") + sets[i];
+            d.exec(sql + " WHERE id = " + id);
+            long long reassigned = 0;
+            if (range_changed && cur[0][0]) {
+                const std::string cam = *cur[0][0];
+                d.exec("UPDATE frames SET rig_id = NULL WHERE rig_id = " + id);  // drop old membership
+                d.exec("UPDATE frames SET rig_id = " + id + " WHERE camera_id = " + cam +
+                       " AND focal_len_mm BETWEEN " + std::to_string(fmin) + " AND " + std::to_string(fmax));
+                reassigned = d.affected_rows();
+            }
+            send_json(res, json{{"updated", std::stoi(id)}, {"reassigned", reassigned}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/equipment/rigs/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const std::string id = std::string(req.matches[1]);
+            d.exec("UPDATE frames SET rig_id = NULL WHERE rig_id = " + id);
+            const long long freed = d.affected_rows();
+            d.exec("DELETE FROM rigs WHERE id = " + id);  // FK also sets frames.rig_id NULL
+            send_json(res, json{{"deleted", std::stoi(id)}, {"freed", freed}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- Server settings (bind/port/tls) ----------------------------------

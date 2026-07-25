@@ -1018,11 +1018,79 @@ async function database() {
           catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
         } }, 'Re-seed header mapping'),
         me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('targets') }, 'Review target names →') : null,
+        me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('equipment') }, 'Manage equipment →') : null,
         mstatus),
       el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Target-name normalization canonicalizes OBJECT values (M101 → “M 101”). Scanning runs in the background; watch it above.'));
 
     app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, scanCard, tablesCard, maint);
     watchScan(scanHost);  // reflect any scan already in progress (or show idle)
+  } catch (e) { showError(e); }
+}
+
+// ---- Equipment (admin): build rigs from camera + focal-length combos --------
+
+async function equipment() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const j = await api('/equipment');
+    const rnd = (v) => Math.round(Number(v));
+    const parts = [el('h2', {}, 'Equipment')];
+
+    // Suggested rigs (uncovered camera + focal clusters).
+    const sstatus = el('div', {});
+    if (j.suggestions.length) {
+      const rows = j.suggestions.map(s => {
+        const name = el('input', { value: `${s.camera}-${rnd((s.focal_min + s.focal_max) / 2)}mm`, style: 'width:12em' });
+        const tel = el('input', { placeholder: 'telescope (optional)', style: 'width:11em' });
+        const fmin = el('input', { type: 'number', value: s.suggest_min, style: 'width:6em' });
+        const fmax = el('input', { type: 'number', value: s.suggest_max, style: 'width:6em' });
+        return el('div', { class: 'rigrow' },
+          el('div', { style: 'min-width:14em' }, el('b', {}, s.camera),
+            el('span', { class: 'muted' }, ` · ${rnd(s.focal_min)}–${rnd(s.focal_max)} mm · ${Number(s.frames).toLocaleString()} frames`)),
+          name, tel, el('span', { class: 'muted' }, 'range'), fmin, el('span', { class: 'muted' }, '–'), fmax,
+          el('button', { class: 'btn primary', onclick: async () => {
+            if (!name.value.trim()) { sstatus.replaceChildren(el('span', { class: 'err-msg' }, 'name required')); return; }
+            try {
+              const r = await apiPost('/equipment/rigs', { name: name.value.trim(), camera_id: s.camera_id, telescope: tel.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value) });
+              sstatus.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.name}; assigned ${Number(r.assigned).toLocaleString()} frame(s)`));
+              equipment();
+            } catch (e) { sstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+          } }, 'Create rig'));
+      });
+      parts.push(el('div', { class: 'card' }, el('h3', {}, 'Suggested rigs'),
+        el('div', { class: 'muted' }, 'Camera + focal-length combinations in your frames that no rig covers yet. Name each and create it; matching frames are assigned immediately.'),
+        el('div', { class: 'culist' }, ...rows), sstatus));
+    }
+
+    // Existing rigs, editable.
+    const rrows = j.rigs.length ? j.rigs.map(r => {
+      const nm = el('input', { value: r.name, style: 'width:12em' });
+      const fmin = el('input', { type: 'number', value: rnd(r.focal_min_mm), style: 'width:6em' });
+      const fmax = el('input', { type: 'number', value: rnd(r.focal_max_mm), style: 'width:6em' });
+      return el('div', { class: 'rigrow' },
+        nm, el('span', { class: 'muted', style: 'min-width:9em' }, r.camera + (r.telescope ? ' · ' + r.telescope : '')),
+        el('span', { class: 'muted' }, 'range'), fmin, el('span', { class: 'muted' }, '–'), fmax,
+        el('span', { class: 'muted' }, `${Number(r.frames).toLocaleString()} frames`),
+        el('button', { class: 'btn', onclick: async () => {
+          try { const x = await apiPatch('/equipment/rigs/' + r.id, { name: nm.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value) });
+                if (x.reassigned != null) alert(`Saved; ${Number(x.reassigned).toLocaleString()} frame(s) reassigned.`); equipment(); }
+          catch (e) { alert(String(e.message || e)); }
+        } }, 'Save'),
+        el('button', { class: 'link', onclick: () => go('query', { rig: r.name }) }, 'query →'),
+        el('button', { class: 'btn ghost', title: 'delete rig', onclick: async () => {
+          if (!confirm(`Delete rig "${r.name}"? Frames keep their files; their rig assignment is cleared.`)) return;
+          try { await apiDelete('/equipment/rigs/' + r.id); equipment(); } catch (e) { alert(String(e.message || e)); }
+        } }, '✕'));
+    }) : [el('div', { class: 'muted' }, 'No rigs yet. Create them from the suggestions above.')];
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Rigs'), el('div', { class: 'culist' }, ...rrows)));
+
+    // Cameras (auto-detected, for context).
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Cameras (auto-detected on scan)'),
+      el('div', { class: 'chips' }, ...(j.cameras.length
+        ? j.cameras.map(c => el('span', { class: 'tagchip' }, `${c.model} · ${Number(c.frames).toLocaleString()}`))
+        : [el('span', { class: 'muted' }, 'none yet — scan a root first')]))));
+
+    app.replaceChildren(...parts);
   } catch (e) { showError(e); }
 }
 
@@ -1220,8 +1288,8 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users, server, targets };
-const ADMIN_VIEWS = ['users', 'server', 'targets'];
+const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users, server, targets, equipment };
+const ADMIN_VIEWS = ['users', 'server', 'targets', 'equipment'];
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';

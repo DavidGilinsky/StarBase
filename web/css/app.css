@@ -175,6 +175,10 @@ b.warn { color: var(--warn); }
 .curow .tagchip { min-width: 8rem; text-align: center; }
 optgroup { color: var(--dim); }
 
+/* equipment builder */
+.rigrow { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; padding: .4rem 0; border-bottom: 1px solid var(--edge); }
+.rigrow:last-child { border-bottom: none; }
+
 /* scan progress */
 .spinner { width: 14px; height: 14px; border: 2px solid var(--edge); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
