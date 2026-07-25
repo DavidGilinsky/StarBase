@@ -175,6 +175,15 @@ b.warn { color: var(--warn); }
 .curow .tagchip { min-width: 8rem; text-align: center; }
 optgroup { color: var(--dim); }
 
+/* directory picker modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 1rem; width: min(620px, 92vw); display: flex; flex-direction: column; gap: .5rem; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.fslist { max-height: 50vh; overflow-y: auto; border: 1px solid var(--edge); border-radius: 8px; background: var(--bg); }
+.fsrow { padding: .3rem .6rem; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; border-bottom: 1px solid var(--edge); }
+.fsrow:last-child { border-bottom: none; }
+.fsrow:hover { background: var(--panel); }
+.fsrow.up { color: var(--dim); }
+
 /* roots & settings */
 .rootcard .rootgrid { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center; margin-top: .5rem; }
 .rootcard .rootgrid label { display: inline-flex; align-items: center; gap: .3rem; }

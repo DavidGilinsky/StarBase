@@ -217,6 +217,41 @@ void HttpServer::Impl::routes() {
         }
     });
 
+    // ---- GET /api/v1/fs/list  (server-side directory browser for root picking) ----
+    // Lists the subdirectories of a path the daemon can see, so the Roots tab can
+    // offer a picker instead of a hand-typed path. Gated like root management: a
+    // caller who can add a root (any path) can already browse to choose one.
+    server->Get("/api/v1/fs/list", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a login is required to browse the server"); return; }
+        try {
+            namespace stdfs = std::filesystem;
+            std::string reqpath = req.has_param("path") ? req.get_param_value("path") : "/";
+            if (reqpath.empty()) reqpath = "/";
+            std::error_code ec;
+            stdfs::path p = stdfs::weakly_canonical(reqpath, ec);
+            if (ec || p.empty()) p = stdfs::path(reqpath);
+            if (!stdfs::is_directory(p, ec)) { send_error(res, 400, "not a directory: " + p.string()); return; }
+
+            json entries = json::array();
+            stdfs::directory_iterator it(p, stdfs::directory_options::skip_permission_denied, ec);
+            if (ec) { send_error(res, 400, "cannot read directory: " + ec.message()); return; }
+            for (const auto& e : it) {
+                std::error_code de;
+                if (e.is_directory(de) && !de)
+                    entries.push_back({{"name", e.path().filename().string()},
+                                       {"path", e.path().string()}});
+            }
+            std::sort(entries.begin(), entries.end(), [](const json& a, const json& b) {
+                return a["name"].get<std::string>() < b["name"].get<std::string>();
+            });
+            json out;
+            out["path"] = p.string();
+            out["parent"] = (p != p.root_path()) ? json(p.parent_path().string()) : json(nullptr);
+            out["entries"] = entries;
+            send_json(res, out);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     // ---- GET /api/v1/facets/:field  (distinct values, for Browse dropdowns) ----
     // Only an allowlisted set of low-cardinality columns, so the field name is
     // safe to interpolate and the query stays cheap.

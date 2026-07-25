@@ -714,6 +714,46 @@ async function detail(id) {
   } catch (e) { drawer.replaceChildren(el('div', { class: 'err-msg' }, String(e.message || e))); }
 }
 
+// ---- Server-side directory picker (modal) ----------------------------------
+
+// Opens a modal that browses the daemon's filesystem; onPick(path) fires with
+// the chosen directory. Navigate by clicking folders or "..", type a path and
+// press Enter to jump, or edit the box directly before choosing.
+function pathBrowser(onPick, start) {
+  const overlay = el('div', { class: 'modal-overlay' });
+  const close = () => overlay.remove();
+  const cur = el('input', { class: 'mono', value: start || '/', style: 'flex:1;min-width:18em' });
+  const listEl = el('div', { class: 'fslist' });
+  const status = el('div', { class: 'muted' });
+
+  async function load(path) {
+    status.textContent = 'loading…'; listEl.replaceChildren();
+    try {
+      const d = await api('/fs/list?path=' + encodeURIComponent(path || '/'));
+      cur.value = d.path;
+      const rows = [];
+      if (d.parent != null) rows.push(el('div', { class: 'fsrow up', onclick: () => load(d.parent) }, '⤴  ..'));
+      for (const e of d.entries) rows.push(el('div', { class: 'fsrow', onclick: () => load(e.path) }, '📁  ' + e.name));
+      listEl.replaceChildren(...(rows.length ? rows : [el('div', { class: 'muted', style: 'padding:.4rem' }, '(no subdirectories)')]));
+      status.textContent = '';
+    } catch (e) { status.textContent = String(e.message || e); }
+  }
+  cur.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') load(cur.value.trim()); });
+
+  overlay.append(el('div', { class: 'modal' },
+    el('div', { class: 'row', style: 'justify-content:space-between' },
+      el('b', {}, 'Choose a directory'),
+      el('button', { class: 'btn ghost', onclick: close }, '✕')),
+    el('div', { class: 'row' }, cur, el('button', { class: 'btn', onclick: () => load(cur.value.trim()) }, 'Go')),
+    listEl, status,
+    el('div', { class: 'row', style: 'justify-content:flex-end;margin-top:.4rem' },
+      el('button', { class: 'btn', onclick: close }, 'Cancel'),
+      el('button', { class: 'btn primary', onclick: () => { onPick(cur.value.trim()); close(); } }, 'Use this directory'))));
+  overlay.onclick = (ev) => { if (ev.target === overlay) close(); };
+  document.body.append(overlay);
+  load(start || '/');
+}
+
 // ---- Roots & Settings ------------------------------------------------------
 
 async function runScan(label, statusEl) {
@@ -734,6 +774,7 @@ function addRootForm() {
   return el('div', { class: 'card' },
     el('h3', {}, 'Add a root'),
     el('div', { class: 'row' }, label, path,
+      el('button', { class: 'btn', onclick: () => pathBrowser((picked) => { path.value = picked; }, path.value.trim() || '/') }, 'Browse…'),
       el('label', {}, writable, ' writable'),
       el('button', { class: 'btn primary', onclick: async () => {
         if (!label.value.trim() || !path.value.trim()) { status.replaceChildren(el('span', { class: 'err-msg' }, 'label and path are required')); return; }
@@ -1210,3 +1251,4 @@ async function boot() {
   } catch (e) { showError(e); }
 }
 boot();
+
