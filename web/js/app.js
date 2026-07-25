@@ -34,6 +34,10 @@ const apiPatch = (path, body) => fetch('/api/v1' + path, {
   method: 'PATCH', headers: authHeaders({ 'Content-Type': 'application/json' }),
   body: JSON.stringify(body)
 }).then(r => r.ok ? r.json() : asError(r));
+const apiPut = (path, body) => fetch('/api/v1' + path, {
+  method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }),
+  body: JSON.stringify(body)
+}).then(r => r.ok ? r.json() : asError(r));
 const apiDelete = (path) => fetch('/api/v1' + path, { method: 'DELETE', headers: authHeaders() })
   .then(r => r.ok ? r.json() : asError(r));
 const apiDeleteBody = (path, body) => fetch('/api/v1' + path, {
@@ -984,6 +988,60 @@ async function users() {
   } catch (e) { showError(e); }
 }
 
+// ---- Server (admin: change the listening interface) ------------------------
+
+async function server() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const [s, ifaces] = await Promise.all([api('/settings'), api('/interfaces')]);
+    const run = s.running, conf = s.configured;
+    const scheme = (t) => (t ? 'https' : 'http');
+
+    const bindInput = el('input', { value: conf.bind, list: 'dl_bind', style: 'width:16em' });
+    const dl = el('datalist', { id: 'dl_bind' }, ...ifaces.map(i => el('option', { value: i.address }, i.name)));
+    const portInput = el('input', { type: 'number', value: conf.port, style: 'width:8em' });
+    const tlsInput = el('input', { type: 'checkbox', checked: conf.tls });
+    const status = el('div', {});
+    const collect = () => ({ bind: bindInput.value.trim(), port: Number(portInput.value), tls: tlsInput.checked });
+
+    const save = async () => {
+      status.replaceChildren(el('span', { class: 'muted' }, 'saving…'));
+      try {
+        const r = await apiPut('/settings', collect());
+        status.replaceChildren(el('span', { class: r.restart_required ? 'warn-msg' : 'ok-msg' },
+          r.restart_required ? `Saved. Use “Restart & apply” to start listening on ${scheme(r.configured.tls)}://${r.configured.bind}:${r.configured.port}.` : 'Saved.'));
+      } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    };
+    const applyNow = async () => {
+      const c = collect();
+      if (!confirm(`Rebind the API to ${scheme(c.tls)}://${c.bind}:${c.port}?\n\nIf the address or port changes, this page will stop responding and you must reconnect at the new URL.`)) return;
+      status.replaceChildren(el('span', { class: 'muted' }, 'applying…'));
+      try {
+        await apiPut('/settings', c);
+        await apiPost('/settings/apply', {});
+        status.replaceChildren(el('span', { class: 'ok-msg' },
+          `Applying now. If this page stops responding, reconnect at ${scheme(c.tls)}://${c.bind}:${c.port}.`));
+      } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    };
+
+    app.replaceChildren(el('h2', {}, 'Server'),
+      el('div', { class: 'card' },
+        el('div', {}, 'Currently listening on ', el('b', {}, `${scheme(run.tls)}://${run.bind}:${run.port}`)),
+        s.restart_required ? el('div', { class: 'warn-msg' }, `⚠ Pending change: configured ${scheme(conf.tls)}://${conf.bind}:${conf.port}. Restart & apply, or restart the daemon, to take effect.`) : null,
+        !s.can_apply ? el('div', { class: 'muted' }, 'Live apply is unavailable; changes take effect on the next daemon restart.') : null),
+      el('div', { class: 'card' }, el('h3', {}, 'Listening interface'),
+        el('div', { class: 'kv' },
+          el('div', { class: 'k' }, 'Bind address'), el('div', { class: 'v' }, el('span', { class: 'combo' }, bindInput, dl)),
+          el('div', { class: 'k' }, 'Port'), el('div', { class: 'v' }, portInput),
+          el('div', { class: 'k' }, 'TLS (HTTPS)'), el('div', { class: 'v' }, el('label', {}, tlsInput, ' enabled'))),
+        el('div', { class: 'muted', style: 'margin:.5rem 0' }, '0.0.0.0 = all interfaces · 127.0.0.1 = localhost only · or pick a specific interface address.'),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn primary', onclick: save }, 'Save'),
+          el('button', { class: 'btn', onclick: applyNow }, 'Restart & apply')),
+        status));
+  } catch (e) { showError(e); }
+}
+
 // ---- shell / router --------------------------------------------------------
 
 function setConn(t) { const c = document.getElementById('conn'); c.textContent = t; c.classList.remove('err'); }
@@ -992,11 +1050,12 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users };
+const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users, server };
+const ADMIN_VIEWS = ['users', 'server'];
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';
-  if (view === 'users' && !(me && me.role === 'admin')) view = 'dashboard';
+  if (ADMIN_VIEWS.includes(view) && !(me && me.role === 'admin')) view = 'dashboard';
   current = view;
   if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -1012,8 +1071,9 @@ let me = null;  // { username, role } when logged in
 
 function chrome(on) {
   document.querySelector('nav').style.visibility = on ? 'visible' : 'hidden';
-  const ub = document.querySelector('nav button[data-view="users"]');
-  if (ub) ub.style.display = (on && me && me.role === 'admin') ? '' : 'none';
+  const admin = on && me && me.role === 'admin';
+  document.querySelectorAll('nav button[data-view="users"], nav button[data-view="server"]')
+    .forEach(b => { b.style.display = admin ? '' : 'none'; });
   const acc = document.getElementById('account');
   if (!on || !me) { acc.replaceChildren(); return; }
   acc.replaceChildren(

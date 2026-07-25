@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -39,6 +40,9 @@ struct ApiConfig {
     std::string staging_root;
     std::string trash_root;
     std::string link_mode = "symlink";
+    // Invoked when the UI asks to apply changed server settings (bind/port/tls).
+    // The daemon wires this to rebind the API server; empty means not supported.
+    std::function<void()> on_apply;
 };
 
 // Runs a cpp-httplib server on a background thread. Each request handler opens

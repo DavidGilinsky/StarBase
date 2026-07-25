@@ -269,6 +269,17 @@ std::vector<RootRow> Database::list_roots() {
     return out;
 }
 
+std::optional<std::string> Database::get_setting(const std::string& name) {
+    auto rows = query("SELECT value FROM settings WHERE name = '" + escape(name) + "' LIMIT 1");
+    if (rows.empty() || !rows[0][0]) return std::nullopt;
+    return *rows[0][0];
+}
+
+void Database::set_setting(const std::string& name, const std::string& value) {
+    exec("INSERT INTO settings (name, value) VALUES ('" + escape(name) + "', '" + escape(value) +
+         "') ON DUPLICATE KEY UPDATE value = VALUES(value)");
+}
+
 std::optional<RootRow> Database::find_root_by_label(const std::string& label) {
     const std::string q = std::string("SELECT ") + kRootColumns +
                           " FROM roots WHERE label = '" + escape(label) + "' LIMIT 1";

@@ -35,12 +35,14 @@ using starbase::log_warn;
 
 namespace {
 
-// Set from signal handlers, so both must be lock-free and async-signal-safe.
+// Set from signal handlers, so all must be lock-free and async-signal-safe.
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};
+std::atomic<bool> g_apply{false};  // SIGUSR1: rebind the API server on new settings
 
 extern "C" void handle_stop(int) { g_stop.store(true); }
 extern "C" void handle_reload(int) { g_reload.store(true); }
+extern "C" void handle_apply(int) { g_apply.store(true); }
 
 void print_version() { std::cout << "starbased " << STARBASE_VERSION << "\n"; }
 
@@ -108,6 +110,8 @@ int main(int argc, char** argv) {
     sigaction(SIGINT, &sa, nullptr);
     sa.sa_handler = handle_reload;
     sigaction(SIGHUP, &sa, nullptr);
+    sa.sa_handler = handle_apply;
+    sigaction(SIGUSR1, &sa, nullptr);
     // A client vanishing mid-write must not take the daemon down with it.
     signal(SIGPIPE, SIG_IGN);
 
@@ -123,13 +127,15 @@ int main(int argc, char** argv) {
     }
 
 #ifdef SB_HAVE_API
-    std::unique_ptr<starbase::api::HttpServer> server;
-    try {
+    // Build an ApiConfig from the file plus any DB settings overrides (api_bind
+    // /api_port/api_tls), so the Server tab can change the listening interface
+    // and have it survive restarts. Falls back to localhost on the given retry.
+    auto build_api = [&cfg](bool force_localhost) {
         starbase::api::ApiConfig api;
         api.bind = cfg.api_bind;
         api.port = cfg.api_port;
-        api.web_root = cfg.web_root;
         api.tls = cfg.api_tls;
+        api.web_root = cfg.web_root;
         api.tls_cert = cfg.api_tls_cert;
         api.tls_key = cfg.api_tls_key;
         api.schema_file = cfg.schema_file;
@@ -143,15 +149,40 @@ int main(int argc, char** argv) {
         api.db.database = cfg.db_name;
         if (const char* v = std::getenv("SB_DB_PASSWORD")) api.db.password = v;
         if (const char* v = std::getenv("SB_API_TOKEN")) api.token = v;
-        // Off-localhost with no token is a footgun: warn loudly.
+        try {
+            starbase::db::Database d(api.db);
+            if (auto v = d.get_setting("api_bind"); v && !v->empty()) api.bind = *v;
+            if (auto v = d.get_setting("api_port"); v && !v->empty()) api.port = std::stoi(*v);
+            if (auto v = d.get_setting("api_tls"); v) api.tls = (*v == "on");
+        } catch (const std::exception& e) {
+            log_warn(std::string("could not read server settings from the database: ") + e.what());
+        }
+        if (force_localhost) api.bind = "127.0.0.1";
+        // POST /settings/apply raises SIGUSR1; the main loop rebinds on it.
+        api.on_apply = [] { std::raise(SIGUSR1); };
         if (api.bind != "127.0.0.1" && api.bind != "localhost" && api.token.empty())
-            log_warn("API bound off localhost with no SB_API_TOKEN; writes are open to the LAN");
-        server = std::make_unique<starbase::api::HttpServer>(std::move(api));
-        server->start();
-    } catch (const std::exception& e) {
-        log_error(std::string("failed to start API server: ") + e.what());
-        return 1;
+            log_warn("API bound off localhost with no SB_API_TOKEN; writes require a login");
+        return api;
+    };
+
+    std::unique_ptr<starbase::api::HttpServer> server;
+    auto start_api = [&](bool force_localhost) {
+        auto api = build_api(force_localhost);
+        const std::string where = api.bind + ":" + std::to_string(api.port);
+        try {
+            server = std::make_unique<starbase::api::HttpServer>(std::move(api));
+            server->start();
+        } catch (const std::exception& e) {
+            log_error("failed to start API server on " + where + ": " + e.what());
+            server.reset();
+        }
+    };
+    start_api(false);
+    if (!server) {  // a bad configured bind must not lock the operator out
+        log_warn("retrying API on localhost");
+        start_api(true);
     }
+    if (!server) return 1;
 #else
     log_info("built without the API/database layer; idling");
 #endif
@@ -167,6 +198,14 @@ int main(int argc, char** argv) {
                 log_error(std::string("reload failed, keeping previous config: ") + e.what());
             }
         }
+#ifdef SB_HAVE_API
+        if (g_apply.exchange(false)) {
+            log_info("applying server settings: rebinding the API");
+            if (server) server->stop();
+            start_api(false);
+            if (!server) { log_warn("rebind failed; retrying API on localhost"); start_api(true); }
+        }
+#endif
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 

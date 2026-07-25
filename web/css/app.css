@@ -66,7 +66,7 @@ tbody tr:hover { background: var(--panel); }
   border-radius: 6px; padding: .35rem .55rem; font-size: .87rem;
 }
 .filters label { color: var(--dim); font-size: .8rem; }
-.filters .combo { display: inline-flex; }
+.combo { display: inline-flex; }
 .pager { display: flex; gap: .5rem; align-items: center; margin-top: .8rem; color: var(--dim); }
 
 /* detail drawer */

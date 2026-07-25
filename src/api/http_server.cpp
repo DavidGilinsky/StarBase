@@ -12,6 +12,13 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <cctype>
+
 #include <algorithm>
 #include <filesystem>
 #include <memory>
@@ -63,6 +70,18 @@ void send_json(httplib::Response& res, const json& body, int status = 200) {
 
 void send_error(httplib::Response& res, int status, const std::string& msg) {
     send_json(res, json{{"error", msg}}, status);
+}
+
+// A syntactically acceptable listen address (IPv4/IPv6 literal or hostname,
+// including 0.0.0.0 / ::). A valid-but-unbindable value is caught at bind time,
+// where the daemon falls back to localhost rather than leaving the API down.
+bool valid_bind(const std::string& b) {
+    if (b.empty() || b.size() > 64) return false;
+    for (const char c : b)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == ':' ||
+              c == '-' || c == '_'))
+            return false;
+    return true;
 }
 
 // Value of one cookie from the request's Cookie header, or empty.
@@ -1185,6 +1204,80 @@ void HttpServer::Impl::routes() {
             d.exec("DELETE FROM users WHERE username = '" + d.escape(user) + "'");
             send_json(res, json{{"deleted", user}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Server settings (bind/port/tls) ----------------------------------
+    // The running values are what this process actually bound; the configured
+    // values are the DB overrides that take effect on the next rebind. The UI
+    // shows both and offers "Restart & apply".
+    auto server_settings = [this]() {
+        auto d = db();
+        std::string cbind = cfg.bind; int cport = cfg.port; bool ctls = cfg.tls;
+        if (auto v = d.get_setting("api_bind"); v && !v->empty()) cbind = *v;
+        if (auto v = d.get_setting("api_port"); v && !v->empty()) { try { cport = std::stoi(*v); } catch (const std::exception&) {} }
+        if (auto v = d.get_setting("api_tls"); v) ctls = (*v == "on");
+        return json{{"running", {{"bind", cfg.bind}, {"port", cfg.port}, {"tls", cfg.tls}}},
+                    {"configured", {{"bind", cbind}, {"port", cport}, {"tls", ctls}}},
+                    {"restart_required", cbind != cfg.bind || cport != cfg.port || ctls != cfg.tls},
+                    {"can_apply", static_cast<bool>(cfg.on_apply)}};
+    };
+
+    server->Get("/api/v1/settings", [this, server_settings](const httplib::Request&, httplib::Response& res) {
+        try { send_json(res, server_settings()); } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Put("/api/v1/settings", [this, server_settings](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            auto d = db();
+            if (body.contains("bind") && body["bind"].is_string()) {
+                const std::string b = body["bind"].get<std::string>();
+                if (!valid_bind(b)) { send_error(res, 400, "invalid bind address"); return; }
+                d.set_setting("api_bind", b);
+            }
+            if (body.contains("port")) {
+                const int p = body["port"].get<int>();
+                if (p < 1 || p > 65535) { send_error(res, 400, "port out of range (1-65535)"); return; }
+                d.set_setting("api_port", std::to_string(p));
+            }
+            if (body.contains("tls")) d.set_setting("api_tls", body["tls"].get<bool>() ? "on" : "off");
+            send_json(res, server_settings());
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // POST /settings/apply: send the response first, then ask the daemon to
+    // rebind (on_apply raises a signal; the rebind happens a beat later, so this
+    // response still flushes to the caller on the old listener).
+    server->Post("/api/v1/settings/apply", [this, server_settings](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json j = server_settings();
+            j["applying"] = static_cast<bool>(cfg.on_apply);
+            send_json(res, j);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); return; }
+        if (cfg.on_apply) cfg.on_apply();
+    });
+
+    // GET /interfaces: the host's bindable addresses, for the Server tab's
+    // bind picker. Always offers all-interfaces and localhost.
+    server->Get("/api/v1/interfaces", [](const httplib::Request&, httplib::Response& res) {
+        json arr = json::array();
+        arr.push_back({{"name", "all interfaces"}, {"address", "0.0.0.0"}});
+        arr.push_back({{"name", "localhost"}, {"address", "127.0.0.1"}});
+        struct ifaddrs* ifa = nullptr;
+        if (getifaddrs(&ifa) == 0) {
+            for (struct ifaddrs* p = ifa; p; p = p->ifa_next) {
+                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+                char host[NI_MAXHOST];
+                if (getnameinfo(p->ifa_addr, sizeof(struct sockaddr_in), host, sizeof(host),
+                                nullptr, 0, NI_NUMERICHOST) == 0 && std::string(host) != "127.0.0.1")
+                    arr.push_back({{"name", p->ifa_name ? p->ifa_name : ""}, {"address", host}});
+            }
+            freeifaddrs(ifa);
+        }
+        send_json(res, arr);
     });
 
     // ---- static web UI at / ----

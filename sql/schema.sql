@@ -741,6 +741,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------------
+-- Runtime settings (key/value)
+--
+-- Overrides for things the UI can change without editing the config file, such
+-- as the API bind address and port. Read at (re)start; a change is applied by
+-- rebinding the API server (SIGUSR1) rather than a full process restart.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS settings (
+    name       VARCHAR(64) NOT NULL,
+    value      TEXT        NULL,
+    updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (name)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------------
 -- Views
 -- ---------------------------------------------------------------------------
 

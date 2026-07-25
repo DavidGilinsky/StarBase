@@ -627,6 +627,17 @@ session (or the static `SB_API_TOKEN`, which still acts as admin for scripts and
 the PJSR helper); reads stay open, and a fresh install with no users and no token
 stays open until the first admin exists. All eight §11 tabs are now built.
 
+A ninth, admin-only **Server** tab (ported from NightWatcher2) changes the API's
+listening interface, port, and TLS without editing the config file. The values
+live in a `settings` key/value table read at (re)start; `GET /api/v1/settings`
+reports both the running and configured values (and whether a restart is
+pending), `PUT` validates and stores them, and `POST /api/v1/settings/apply`
+raises `SIGUSR1` so the daemon rebinds the API in place (the response flushes on
+the old listener first). A bad configured bind falls back to `127.0.0.1` rather
+than leaving the operator locked out. The bind field is a combo backed by
+`GET /api/v1/interfaces`, which enumerates the host's addresses via
+`getifaddrs`, plus `0.0.0.0` and `127.0.0.1`.
+
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:
 

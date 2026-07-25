@@ -124,6 +124,10 @@ public:
     // Highest applied schema version, or 0 if the table is absent or empty.
     int schema_version();
 
+    // ---- Runtime settings (key/value) ----
+    std::optional<std::string> get_setting(const std::string& name);
+    void set_setting(const std::string& name, const std::string& value);
+
     // ---- Roots ----
 
     // Returns the new row id. Throws DbError if the label or path is taken.
