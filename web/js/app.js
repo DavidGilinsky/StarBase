@@ -36,6 +36,10 @@ const apiPatch = (path, body) => fetch('/api/v1' + path, {
 }).then(r => r.ok ? r.json() : asError(r));
 const apiDelete = (path) => fetch('/api/v1' + path, { method: 'DELETE', headers: authHeaders() })
   .then(r => r.ok ? r.json() : asError(r));
+const apiDeleteBody = (path, body) => fetch('/api/v1' + path, {
+  method: 'DELETE', headers: authHeaders({ 'Content-Type': 'application/json' }),
+  body: JSON.stringify(body)
+}).then(r => r.ok ? r.json() : asError(r));
 
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -89,6 +93,14 @@ const OPS_FOR = (type) => {
   return ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'between', 'in', 'isnull', 'notnull'];
 };
 const noValue = (op) => op === 'isnull' || op === 'notnull';
+
+// Curation lists (tags, collections), cached and refreshed on demand so the
+// query builder and actions bar can offer them without a fetch per render.
+let gTags = [], gCollections = [];
+async function loadCuration() {
+  try { const [t, c] = await Promise.all([api('/tags'), api('/collections')]); gTags = t; gCollections = c; }
+  catch (_e) { /* keep whatever we had */ }
+}
 
 // ---- Dashboard -------------------------------------------------------------
 
@@ -195,6 +207,8 @@ const qb = {
 // Preset from Browse/Dashboard: map simple {object,image_type,filter,night,rig}.
 function presetToConds(p) {
   const conds = [];
+  if (p.__tag) conds.push({ field: 'tag', op: 'tagged', value: p.__tag });
+  if (p.__collection) conds.push({ field: 'collection', op: 'in_collection', value: p.__collection });
   const m = { object: 'object', image_type: 'image_type', filter: 'filter', night: 'session_night', rig: 'rig' };
   for (const [k, field] of Object.entries(m))
     if (p[k]) conds.push({ field, op: field === 'object' || field === 'filter' || field === 'rig' ? 'like' : 'eq', value: p[k] });
@@ -207,6 +221,16 @@ function buildAST() {
   const clauses = [];
   for (const c of qb.conds) {
     if (!c.field) continue;
+    if (c.field === 'tag') {
+      if (!c.value) continue;
+      clauses.push({ op: c.op === 'untagged' ? 'untagged' : 'tagged', value: c.value });
+      continue;
+    }
+    if (c.field === 'collection') {
+      if (!c.value) continue;
+      clauses.push({ op: 'in_collection', value: c.value });
+      continue;
+    }
     if (noValue(c.op)) { clauses.push({ field: c.field, op: c.op }); continue; }
     if (c.op === 'between') {
       if (c.value === '' || c.value2 === '') continue;
@@ -239,6 +263,8 @@ function loadAST(ast) {
   qb.conds = []; qb.cone = { on: false, ra: '', dec: '', radius: '' }; qb.raw = false;
   const asCond = (n) => {
     if (n.op === 'cone') { qb.cone = { on: true, ra: n.ra, dec: n.dec, radius: n.radius_deg }; return true; }
+    if (n.op === 'tagged' || n.op === 'untagged') { qb.conds.push({ field: 'tag', op: n.op, value: n.value }); return true; }
+    if (n.op === 'in_collection') { qb.conds.push({ field: 'collection', op: 'in_collection', value: n.value }); return true; }
     if (!n.field || (n.op && ['and', 'or', 'not'].includes(n.op))) return false;
     const op = n.op || 'eq';
     const c = { field: n.field, op };
@@ -259,18 +285,41 @@ function loadAST(ast) {
 }
 
 function condRow(c, i) {
-  const type = FIELDS[c.field] || 'str';
-  const fieldSel = el('select', { onchange: (e) => { c.field = e.target.value; const ops = OPS_FOR(FIELDS[c.field]); if (!ops.includes(c.op)) c.op = ops[0]; renderQuery(); } },
+  const fieldSel = el('select', { onchange: (e) => {
+      c.field = e.target.value;
+      if (c.field === 'tag') c.op = 'tagged';
+      else if (c.field === 'collection') c.op = 'in_collection';
+      else { const ops = OPS_FOR(FIELDS[c.field]); if (!ops.includes(c.op)) c.op = ops[0]; }
+      c.value = ''; renderQuery();
+    } },
     el('option', { value: '', selected: !c.field }, 'field…'),
-    ...Object.keys(FIELDS).map(f => el('option', { value: f, selected: c.field === f }, f)));
-  const opSel = el('select', { onchange: (e) => { c.op = e.target.value; renderQuery(); } },
-    ...OPS_FOR(type).map(o => el('option', { value: o, selected: c.op === o }, OP_LABEL[o])));
-  const parts = [fieldSel, opSel];
-  if (!noValue(c.op)) {
-    parts.push(el('input', { placeholder: c.op === 'in' ? 'a, b, c' : 'value', value: c.value != null ? c.value : '', onchange: (e) => c.value = e.target.value }));
-    if (c.op === 'between')
-      parts.push(el('span', { class: 'muted' }, 'and'),
-        el('input', { placeholder: 'value', value: c.value2 != null ? c.value2 : '', onchange: (e) => c.value2 = e.target.value }));
+    ...Object.keys(FIELDS).map(f => el('option', { value: f, selected: c.field === f }, f)),
+    el('optgroup', { label: 'membership' },
+      el('option', { value: 'tag', selected: c.field === 'tag' }, '🏷 tag'),
+      el('option', { value: 'collection', selected: c.field === 'collection' }, '📁 collection')));
+  const parts = [fieldSel];
+
+  if (c.field === 'tag' || c.field === 'collection') {
+    const isTag = c.field === 'tag';
+    const opSel = el('select', { onchange: (e) => c.op = e.target.value },
+      ...(isTag ? [['tagged', 'is'], ['untagged', 'is not']] : [['in_collection', 'is']])
+        .map(([v, l]) => el('option', { value: v, selected: c.op === v }, l)));
+    const names = (isTag ? gTags : gCollections).map(x => x.name);
+    const valSel = el('select', { onchange: (e) => c.value = e.target.value },
+      el('option', { value: '', selected: !c.value }, isTag ? '(pick a tag)' : '(pick a collection)'),
+      ...names.map(n => el('option', { value: n, selected: c.value === n }, n)));
+    parts.push(opSel, valSel);
+  } else {
+    const type = FIELDS[c.field] || 'str';
+    const opSel = el('select', { onchange: (e) => { c.op = e.target.value; renderQuery(); } },
+      ...OPS_FOR(type).map(o => el('option', { value: o, selected: c.op === o }, OP_LABEL[o])));
+    parts.push(opSel);
+    if (!noValue(c.op)) {
+      parts.push(el('input', { placeholder: c.op === 'in' ? 'a, b, c' : 'value', value: c.value != null ? c.value : '', onchange: (e) => c.value = e.target.value }));
+      if (c.op === 'between')
+        parts.push(el('span', { class: 'muted' }, 'and'),
+          el('input', { placeholder: 'value', value: c.value2 != null ? c.value2 : '', onchange: (e) => c.value2 = e.target.value }));
+    }
   }
   parts.push(el('button', { class: 'btn ghost', title: 'remove', onclick: () => { qb.conds.splice(i, 1); renderQuery(); } }, '✕'));
   return el('div', { class: 'cond' }, ...parts);
@@ -404,12 +453,42 @@ function actionsBar() {
     } catch (e) { setStatus(el('div', { class: 'err-msg' }, String(e.message || e))); }
   } }, 'Run');
 
+  // Tag / untag the whole matching set (not bounded by act-limit: curation is
+  // cheap, reversible metadata).
+  const tagSel = el('select', {}, gTags.length
+    ? gTags.map(t => el('option', { value: t.id }, t.name))
+    : [el('option', { value: '' }, '(create a tag first)')]);
+  const tagBtn = el('button', { class: 'btn', onclick: async () => {
+    if (!tagSel.value) return; let filter; try { filter = filterOrThrow(); } catch (_e) { return; }
+    busy('Tagging…');
+    try { const r = await apiPost('/tags/' + tagSel.value + '/members', { filter }); setStatus(el('div', { class: 'ok-msg' }, `tagged ${r.added} frame(s)`)); loadCuration(); }
+    catch (e) { setStatus(el('div', { class: 'err-msg' }, String(e.message || e))); }
+  } }, 'Tag');
+  const untagBtn = el('button', { class: 'btn ghost', onclick: async () => {
+    if (!tagSel.value) return; let filter; try { filter = filterOrThrow(); } catch (_e) { return; }
+    busy('Untagging…');
+    try { const r = await apiDeleteBody('/tags/' + tagSel.value + '/members', { filter }); setStatus(el('div', { class: 'ok-msg' }, `untagged ${r.removed} frame(s)`)); loadCuration(); }
+    catch (e) { setStatus(el('div', { class: 'err-msg' }, String(e.message || e))); }
+  } }, 'Untag');
+
+  const collSel = el('select', {}, gCollections.length
+    ? gCollections.map(c => el('option', { value: c.id }, c.name))
+    : [el('option', { value: '' }, '(create a collection first)')]);
+  const collBtn = el('button', { class: 'btn', onclick: async () => {
+    if (!collSel.value) return; let filter; try { filter = filterOrThrow(); } catch (_e) { return; }
+    busy('Adding to collection…');
+    try { const r = await apiPost('/collections/' + collSel.value + '/members', { filter }); setStatus(el('div', { class: 'ok-msg' }, `added ${r.added} frame(s)`)); loadCuration(); }
+    catch (e) { setStatus(el('div', { class: 'err-msg' }, String(e.message || e))); }
+  } }, 'Add');
+
   return el('div', { class: 'actions card' },
     el('h3', {}, 'Act on this result set'),
     el('div', { class: 'act-row' }, el('b', {}, 'Stage'), linkMode, stageBtn,
       el('span', { class: 'sp' }), el('span', { class: 'muted' }, 'act on ≤'), actLimit, el('span', { class: 'muted' }, 'frames')),
     el('div', { class: 'act-row' }, el('b', {}, 'WBPP'), el('label', {}, loadOnly, ' loadOnly'), kw, outDir, wbppBtn),
     el('div', { class: 'act-row' }, el('b', {}, 'Export'), fmtSel, exportBtn),
+    el('div', { class: 'act-row' }, el('b', {}, 'Tag'), tagSel, tagBtn, untagBtn,
+      el('span', { class: 'sp' }), el('b', {}, 'Collection'), collSel, collBtn),
     el('div', { class: 'act-row danger-row' }, el('b', {}, 'Filesystem'), fsOp, fsTarget, el('label', {}, dry, ' dry run'), fsBtn),
     status);
 }
@@ -476,7 +555,8 @@ function renderQuery() {
   if (c) c.textContent = qb.lastCount != null ? `${Number(qb.lastCount).toLocaleString()} frames match` : '';
 }
 
-function query(preset) {
+async function query(preset) {
+  await loadCuration();
   if (preset) { qb.conds = presetToConds(preset); qb.raw = false; qb.offset = 0; }
   app.replaceChildren(
     el('div', { id: 'qbuilder' }, queryBuilder()),
@@ -555,6 +635,16 @@ async function detail(id) {
       el('h3', {}, fr.filename),
       el('div', { class: 'muted', style: 'word-break:break-all' }, fr.abs_path),
       kv];
+
+    // Tags and collection membership (chips).
+    if ((fr.tags && fr.tags.length) || (fr.collections && fr.collections.length)) {
+      const chips = el('div', { class: 'chips' });
+      for (const t of (fr.tags || []))
+        chips.append(el('span', { class: 'tagchip', style: t.color ? `border-color:${t.color};color:${t.color}` : '' }, '🏷 ' + t.name));
+      for (const c of (fr.collections || []))
+        chips.append(el('span', { class: 'tagchip coll', onclick: () => { drawer.classList.add('hidden'); go('query', { __collection: c.name }); } }, '📁 ' + c.name));
+      parts.push(chips);
+    }
 
     // Sidecars (M9)
     if (fr.artifacts && fr.artifacts.length) {
@@ -685,6 +775,80 @@ async function roots() {
   } catch (e) { showError(e); }
 }
 
+// ---- Collections & Tags ----------------------------------------------------
+
+function tagsCard() {
+  const name = el('input', { placeholder: 'tag name', style: 'width:10em' });
+  const color = el('input', { type: 'color', value: '#58a6ff', title: 'color' });
+  const desc = el('input', { placeholder: 'description (optional)', style: 'flex:1;min-width:12em' });
+  const status = el('span', {});
+  const rows = gTags.length ? gTags.map(t => el('div', { class: 'curow' },
+    el('span', { class: 'tagchip', style: t.color ? `border-color:${t.color};color:${t.color}` : '' }, t.name),
+    el('span', { class: 'muted' }, `${Number(t.count || 0).toLocaleString()} frames`),
+    el('button', { class: 'link', onclick: () => go('query', { __tag: t.name }) }, 'query →'),
+    el('button', { class: 'btn ghost', title: 'delete tag', onclick: async () => {
+      if (!confirm(`Delete tag "${t.name}"? Frames keep their files; only the tag is removed.`)) return;
+      try { await apiDelete('/tags/' + t.id); tags(); } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    } }, '✕')))
+    : [el('div', { class: 'muted' }, 'No tags yet. Create one, then tag a query result from the Query tab.')];
+  return el('div', { class: 'card' }, el('h3', {}, 'Tags'),
+    el('div', { class: 'row' }, name, color, desc,
+      el('button', { class: 'btn primary', onclick: async () => {
+        if (!name.value.trim()) { status.replaceChildren(el('span', { class: 'err-msg' }, 'name is required')); return; }
+        try { await apiPost('/tags', { name: name.value.trim(), color: color.value, description: desc.value }); tags(); }
+        catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Create tag'), status),
+    el('div', { class: 'culist' }, ...rows));
+}
+
+function collectionsCard() {
+  const name = el('input', { placeholder: 'collection name', style: 'width:14em' });
+  const desc = el('input', { placeholder: 'description (optional)', style: 'flex:1;min-width:12em' });
+  const status = el('span', {});
+  const rows = gCollections.length ? gCollections.map(c => el('div', { class: 'curow' },
+    el('b', {}, c.name),
+    el('span', { class: 'muted' }, `${Number(c.count || 0).toLocaleString()} frames`),
+    el('button', { class: 'link', onclick: () => collectionDetail(c.id) }, 'view'),
+    el('button', { class: 'link', onclick: () => go('query', { __collection: c.name }) }, 'query →'),
+    el('button', { class: 'btn ghost', title: 'delete collection', onclick: async () => {
+      if (!confirm(`Delete collection "${c.name}"? Frames keep their files.`)) return;
+      try { await apiDelete('/collections/' + c.id); tags(); } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    } }, '✕')))
+    : [el('div', { class: 'muted' }, 'No collections yet. Create one, then add a query result from the Query tab.')];
+  return el('div', { class: 'card' }, el('h3', {}, 'Collections'),
+    el('div', { class: 'row' }, name, desc,
+      el('button', { class: 'btn primary', onclick: async () => {
+        if (!name.value.trim()) { status.replaceChildren(el('span', { class: 'err-msg' }, 'name is required')); return; }
+        try { await apiPost('/collections', { name: name.value.trim(), description: desc.value }); tags(); }
+        catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Create collection'), status),
+    el('div', { class: 'culist' }, ...rows));
+}
+
+async function collectionDetail(id) {
+  drawer.classList.remove('hidden');
+  drawer.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const c = await api('/collections/' + id);
+    drawer.replaceChildren(
+      el('button', { class: 'btn close', onclick: () => drawer.classList.add('hidden') }, '✕'),
+      el('h3', {}, '📁 ' + c.name),
+      c.description ? el('div', { class: 'muted' }, c.description) : null,
+      el('div', { class: 'row', style: 'margin:.5rem 0' },
+        el('button', { class: 'btn', onclick: () => { drawer.classList.add('hidden'); go('query', { __collection: c.name }); } }, 'Open in Query'),
+        el('span', { class: 'muted' }, `${c.frames.length} frames`)),
+      el('div', { class: 'hdr' }, resultsTable(c.frames)));
+  } catch (e) { drawer.replaceChildren(el('div', { class: 'err-msg' }, String(e.message || e))); }
+}
+
+async function tags() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    await loadCuration();
+    app.replaceChildren(el('h2', {}, 'Collections & Tags'), tagsCard(), collectionsCard());
+  } catch (e) { showError(e); }
+}
+
 // ---- shell / router --------------------------------------------------------
 
 function setConn(t) { const c = document.getElementById('conn'); c.textContent = t; c.classList.remove('err'); }
@@ -693,7 +857,7 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots };
+const VIEWS = { dashboard, browse, query, jobs, roots, tags };
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';

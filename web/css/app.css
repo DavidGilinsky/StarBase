@@ -152,6 +152,17 @@ textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monosp
 .calgroup table { margin-top: .3rem; }
 b.warn { color: var(--warn); }
 
+/* tags & collections */
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .6rem 0; }
+.tagchip { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .8rem; border: 1px solid var(--edge); color: var(--ink); }
+.tagchip.coll { cursor: pointer; color: var(--accent); border-color: #1c3a5e; }
+.culist { margin-top: .6rem; }
+.curow { display: flex; align-items: center; gap: .8rem; padding: .35rem 0; border-bottom: 1px solid var(--edge); }
+.curow:last-child { border-bottom: none; }
+.curow b { min-width: 10rem; }
+.curow .tagchip { min-width: 8rem; text-align: center; }
+optgroup { color: var(--dim); }
+
 /* roots & settings */
 .rootcard .rootgrid { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center; margin-top: .5rem; }
 .rootcard .rootgrid label { display: inline-flex; align-items: center; gap: .3rem; }

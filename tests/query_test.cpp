@@ -89,6 +89,17 @@ int main() {
         check(contains(C(json::parse(R"({"field":"keyword:SWCREATE","op":"like","value":"NINA%"})")),
                        "k.value LIKE 'NINA%'"), "string keyword compares as text");
 
+        // ---- tag / collection membership -> correlated EXISTS ----
+        const std::string tagged = C(json::parse(R"({"op":"tagged","value":"review"})"));
+        check(contains(tagged, "EXISTS (SELECT 1 FROM frame_tags ft"), "tagged -> EXISTS on frame_tags");
+        check(contains(tagged, "t.name = 'review'"), "tag matched by name");
+        check(contains(tagged, "ft.frame_id = v_frames.frame_id"), "tag correlated on the outer frame");
+        check(contains(C(json::parse(R"({"op":"tagged","value":7})")), "ft.tag_id = 7"), "tag matched by id");
+        check(C(json::parse(R"({"op":"untagged","value":"review"})")).rfind("NOT ", 0) == 0, "untagged negates");
+        const std::string incoll = C(json::parse(R"({"op":"in_collection","value":"NGC7000"})"));
+        check(contains(incoll, "FROM collection_frames cf"), "in_collection -> EXISTS on collection_frames");
+        check(contains(incoll, "c.name = 'NGC7000'"), "collection matched by name");
+
         // ---- cone search ----
         const std::string cone = C(json::parse(R"({"op":"cone","ra":311.4,"dec":30.7,"radius_deg":1.5})"));
         check(contains(cone, "dec_deg BETWEEN"), "cone has a dec bounding box");

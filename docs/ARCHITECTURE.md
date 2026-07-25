@@ -603,9 +603,17 @@ all, and remove. This closed two backend gaps the page exposed: the scanner now
 writes its pass back into the root's bookkeeping (`last_scan_status`,
 `last_scan_end`, `file_count`) instead of leaving a permanent "never", and it
 now honours each root's own `ignore_globs` (carried on `RootRow`, split on comma
-or newline) rather than only the config default. Still unbuilt: Collections &
-Tags (no backend yet), Users (token-only today; PBKDF2 users from NightWatcher2
-not ported), and a Database tab.
+or newline) rather than only the config default. The **Collections & Tags** tab
+manages both: create/delete tags (name, colour, description) and collections,
+see member counts, and jump from either straight into a filtered query. Curation
+is applied to a result set from the Query tab's actions bar (Tag / Untag / Add to
+collection over the current filter), and the query builder gained membership
+conditions (`tagged` / `untagged` / `in_collection`) that compile to correlated
+`EXISTS` predicates over `frame_tags` / `collection_frames` and compose with
+everything else, so "tagged review and not in NGC7000 project" is one query. A
+frame's tags and collections show as chips in its detail drawer. Still unbuilt:
+Users (token-only today; PBKDF2 users from NightWatcher2 not ported) and a
+Database tab.
 
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:

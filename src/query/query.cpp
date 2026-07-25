@@ -143,6 +143,33 @@ std::string compile_cone(const json& node, db::Database& db) {
     return "(ra_deg IS NOT NULL AND dec_deg IS NOT NULL AND (" + bbox + ") AND " + hav + ")";
 }
 
+// Membership in frame_tags by tag name (string) or id (number), as a correlated
+// EXISTS on the outer v_frames row. `untagged` negates it.
+std::string compile_tagged(const json& node, db::Database& db, bool negate) {
+    if (!node.contains("value")) throw QueryError("tagged needs a tag name or id");
+    const json& v = node["value"];
+    std::string cond;
+    if (v.is_number()) cond = "ft.tag_id = " + std::to_string(v.get<long long>());
+    else if (v.is_string()) cond = "t.name = '" + db.escape(v.get<std::string>()) + "'";
+    else throw QueryError("tag value must be a name or id");
+    const std::string ex =
+        "EXISTS (SELECT 1 FROM frame_tags ft JOIN tags t ON t.id = ft.tag_id "
+        "WHERE ft.frame_id = v_frames.frame_id AND " + cond + ")";
+    return negate ? "NOT " + ex : ex;
+}
+
+// Membership in a collection by name or id.
+std::string compile_in_collection(const json& node, db::Database& db) {
+    if (!node.contains("value")) throw QueryError("in_collection needs a name or id");
+    const json& v = node["value"];
+    std::string cond;
+    if (v.is_number()) cond = "cf.collection_id = " + std::to_string(v.get<long long>());
+    else if (v.is_string()) cond = "c.name = '" + db.escape(v.get<std::string>()) + "'";
+    else throw QueryError("collection value must be a name or id");
+    return "EXISTS (SELECT 1 FROM collection_frames cf JOIN collections c "
+           "ON c.id = cf.collection_id WHERE cf.frame_id = v_frames.frame_id AND " + cond + ")";
+}
+
 std::string compile_comparison(const json& node, db::Database& db) {
     const std::string field = require_string(node.at("field"), "field");
     if (field.rfind("keyword:", 0) == 0) return compile_keyword(field, node, db);
@@ -196,6 +223,8 @@ std::string compile_node(const json& node, db::Database& db) {
         return "NOT (" + compile_node(clauses[0], db) + ")";
     }
     if (op == "cone") return compile_cone(node, db);
+    if (op == "tagged" || op == "untagged") return compile_tagged(node, db, op == "untagged");
+    if (op == "in_collection") return compile_in_collection(node, db);
 
     return compile_comparison(node, db);
 }

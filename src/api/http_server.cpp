@@ -304,6 +304,16 @@ void HttpServer::Impl::routes() {
                                 "WHERE frame_id = " + id + " ORDER BY filename");
             frame["artifacts"] =
                 rows_to_json(arts, {"kind", "filename", "rel_path", "size_bytes", "mtime"});
+
+            // Tags on this frame, and the collections it belongs to.
+            auto tg = d.query("SELECT t.id, t.name, t.color FROM frame_tags ft "
+                              "JOIN tags t ON t.id = ft.tag_id WHERE ft.frame_id = " + id +
+                              " ORDER BY t.name");
+            frame["tags"] = rows_to_json(tg, {"id", "name", "color"});
+            auto cl = d.query("SELECT c.id, c.name FROM collection_frames cf "
+                              "JOIN collections c ON c.id = cf.collection_id "
+                              "WHERE cf.frame_id = " + id + " ORDER BY c.name");
+            frame["collections"] = rows_to_json(cl, {"id", "name"});
             send_json(res, frame);
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
@@ -693,6 +703,181 @@ void HttpServer::Impl::routes() {
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
         }
+    });
+
+    // ---- Tags and collections ---------------------------------------------
+    // A frame set to add/remove comes from the same {filter}|{frames:[ids]} body
+    // the actions endpoint takes; this renders it to a WHERE over v_frames.
+    auto set_where = [](db::Database& d, const json& body) -> std::string {
+        if (body.contains("frames") && body["frames"].is_array() && !body["frames"].empty()) {
+            std::string list;
+            for (const auto& v : body["frames"]) {
+                if (!list.empty()) list += ",";
+                list += std::to_string(v.get<long long>());
+            }
+            return "frame_id IN (" + list + ")";
+        }
+        if (body.contains("filter"))
+            return starbase::query::compile_filter(body["filter"], d);
+        return "";
+    };
+
+    // ---- Tags: list / create / delete ----
+    server->Get("/api/v1/tags", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query(
+                "SELECT t.id, t.name, t.color, t.description, "
+                "(SELECT COUNT(*) FROM frame_tags ft WHERE ft.tag_id = t.id) AS n "
+                "FROM tags t ORDER BY t.name");
+            send_json(res, rows_to_json(rows, {"id", "name", "color", "description", "count"}));
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Post("/api/v1/tags", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            json body = json::parse(req.body);
+            const std::string name = body.value("name", "");
+            if (name.empty()) { send_error(res, 400, "name is required"); return; }
+            const std::string color = body.value("color", "");
+            const std::string desc = body.value("description", "");
+            d.exec("INSERT INTO tags (name, color, description) VALUES ('" + d.escape(name) + "', " +
+                   (color.empty() ? "NULL" : "'" + d.escape(color) + "'") + ", " +
+                   (desc.empty() ? "NULL" : "'" + d.escape(desc) + "'") + ") "
+                   "ON DUPLICATE KEY UPDATE color=VALUES(color), description=VALUES(description)");
+            send_json(res, json{{"saved", name}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Delete(R"(/api/v1/tags/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            d.exec("DELETE FROM tags WHERE id = " + d.escape(req.matches[1]));
+            send_json(res, json{{"deleted", std::stoi(req.matches[1])}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Tag membership: bulk add / remove over a frame set ----
+    server->Post(R"(/api/v1/tags/(\d+)/members)", [this, set_where](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            const std::string tid = d.escape(req.matches[1]);
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string where;
+            try { where = set_where(d, body); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            if (where.empty()) { send_error(res, 400, "give 'frames' or 'filter'"); return; }
+            d.exec("INSERT IGNORE INTO frame_tags (frame_id, tag_id) SELECT frame_id, " + tid +
+                   " FROM v_frames WHERE " + where);
+            send_json(res, json{{"tag_id", std::stoi(tid)}, {"added", d.affected_rows()}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Delete(R"(/api/v1/tags/(\d+)/members)", [this, set_where](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            const std::string tid = d.escape(req.matches[1]);
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string where;
+            try { where = set_where(d, body); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            if (where.empty()) { send_error(res, 400, "give 'frames' or 'filter'"); return; }
+            d.exec("DELETE FROM frame_tags WHERE tag_id = " + tid +
+                   " AND frame_id IN (SELECT frame_id FROM v_frames WHERE " + where + ")");
+            send_json(res, json{{"tag_id", std::stoi(tid)}, {"removed", d.affected_rows()}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Collections: list / create / detail / delete ----
+    server->Get("/api/v1/collections", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query(
+                "SELECT c.id, c.name, c.description, "
+                "(SELECT COUNT(*) FROM collection_frames cf WHERE cf.collection_id = c.id) AS n, "
+                "DATE_FORMAT(c.updated_at,'%Y-%m-%dT%H:%i:%sZ') FROM collections c ORDER BY c.name");
+            send_json(res, rows_to_json(rows, {"id", "name", "description", "count", "updated_at"}));
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Post("/api/v1/collections", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            json body = json::parse(req.body);
+            const std::string name = body.value("name", "");
+            if (name.empty()) { send_error(res, 400, "name is required"); return; }
+            const std::string desc = body.value("description", "");
+            d.exec("INSERT INTO collections (name, description) VALUES ('" + d.escape(name) + "', " +
+                   (desc.empty() ? "NULL" : "'" + d.escape(desc) + "'") + ") "
+                   "ON DUPLICATE KEY UPDATE description=VALUES(description)");
+            send_json(res, json{{"saved", name}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Get(R"(/api/v1/collections/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto d = db();
+            const std::string id = d.escape(req.matches[1]);
+            auto c = d.query("SELECT id, name, description FROM collections WHERE id = " + id);
+            if (c.empty()) { send_error(res, 404, "no such collection"); return; }
+            json out;
+            out["id"] = cell(c[0], 0); out["name"] = cell(c[0], 1); out["description"] = cell(c[0], 2);
+            auto members = d.query(
+                "SELECT v.frame_id, v.image_type, v.object, v.filter, v.session_night, "
+                "v.exposure_s, v.gain, v.rig, v.filename FROM collection_frames cf "
+                "JOIN v_frames v ON v.frame_id = cf.frame_id WHERE cf.collection_id = " + id +
+                " ORDER BY cf.position, cf.added_at LIMIT 5000");
+            out["frames"] = rows_to_json(members, {"frame_id", "image_type", "object", "filter",
+                                                   "session_night", "exposure_s", "gain", "rig", "filename"});
+            send_json(res, out);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Delete(R"(/api/v1/collections/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            d.exec("DELETE FROM collections WHERE id = " + d.escape(req.matches[1]));
+            send_json(res, json{{"deleted", std::stoi(req.matches[1])}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Collection membership: bulk add / remove ----
+    server->Post(R"(/api/v1/collections/(\d+)/members)", [this, set_where](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            const std::string cid = d.escape(req.matches[1]);
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string where;
+            try { where = set_where(d, body); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            if (where.empty()) { send_error(res, 400, "give 'frames' or 'filter'"); return; }
+            d.exec("INSERT IGNORE INTO collection_frames (collection_id, frame_id) SELECT " + cid +
+                   ", frame_id FROM v_frames WHERE " + where);
+            send_json(res, json{{"collection_id", std::stoi(cid)}, {"added", d.affected_rows()}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Delete(R"(/api/v1/collections/(\d+)/members)", [this, set_where](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            const std::string cid = d.escape(req.matches[1]);
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string where;
+            try { where = set_where(d, body); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            if (where.empty()) { send_error(res, 400, "give 'frames' or 'filter'"); return; }
+            d.exec("DELETE FROM collection_frames WHERE collection_id = " + cid +
+                   " AND frame_id IN (SELECT frame_id FROM v_frames WHERE " + where + ")");
+            send_json(res, json{{"collection_id", std::stoi(cid)}, {"removed", d.affected_rows()}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- static web UI at / ----
