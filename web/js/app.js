@@ -102,11 +102,15 @@ async function loadCuration() {
   catch (_e) { /* keep whatever we had */ }
 }
 
-// Distinct rigs present in the index, for the Browse filter dropdown. Cached;
-// a page reload picks up rigs discovered by a later scan.
-let gRigs = [];
-async function loadRigs() {
-  try { gRigs = await api('/rigs'); } catch (_e) { /* keep whatever we had */ }
+// Distinct values per facet (rig, camera, filter, object) for the Browse
+// dropdowns. Cached; a page reload picks up values discovered by a later scan.
+let gFacets = { rig: [], camera: [], filter: [], object: [] };
+async function loadFacets() {
+  const fields = ['rig', 'camera', 'filter', 'object'];
+  try {
+    const lists = await Promise.all(fields.map(f => api('/facets/' + f)));
+    fields.forEach((f, i) => { gFacets[f] = lists[i]; });
+  } catch (_e) { /* keep whatever we had */ }
 }
 
 // ---- Dashboard -------------------------------------------------------------
@@ -168,25 +172,35 @@ const bstate = { filters: {}, offset: 0, limit: 50, total: 0 };
 
 async function browse(preset) {
   if (preset) { bstate.filters = { ...preset }; bstate.offset = 0; }
-  if (!gRigs.length) await loadRigs();
+  if (!gFacets.rig.length && !gFacets.object.length) await loadFacets();
   const f = bstate.filters;
+  const setF = (name, v) => { if (v) f[name] = v; else delete f[name]; bstate.offset = 0; browse(); };
   const input = (name, ph) => el('input', {
-    name, placeholder: ph, value: f[name] || '',
-    onchange: (e) => { if (e.target.value) f[name] = e.target.value; else delete f[name]; bstate.offset = 0; browse(); }
+    name, placeholder: ph, value: f[name] || '', onchange: (e) => setF(name, e.target.value)
   });
   const select = (name, anyLabel, opts) => {
     const values = opts.slice();
     if (f[name] && !values.includes(f[name])) values.unshift(f[name]);  // keep an unknown preset visible
-    return el('select', { onchange: (e) => { if (e.target.value) f[name] = e.target.value; else delete f[name]; bstate.offset = 0; browse(); } },
+    return el('select', { onchange: (e) => setF(name, e.target.value) },
       el('option', { value: '', selected: !f[name] }, anyLabel),
       ...values.map(v => el('option', { value: v, selected: f[name] === v }, v)));
   };
-  const typeSel = select('image_type', 'any type', ['light', 'dark', 'flat', 'bias', 'darkflat', 'master', 'unknown']);
-  const rigSel = select('rig', 'any rig', gRigs);
+  // A typeable dropdown: an input backed by a datalist, so a value can be picked
+  // or typed. Used for object, which has more distinct values than a plain menu.
+  const combo = (name, ph, opts) => {
+    const listId = 'dl_' + name;
+    return el('span', { class: 'combo' },
+      el('input', { name, placeholder: ph, value: f[name] || '', list: listId, onchange: (e) => setF(name, e.target.value) }),
+      el('datalist', { id: listId }, ...opts.map(v => el('option', { value: v }))));
+  };
 
   const bar = el('div', { class: 'filters' },
-    input('object', 'target'), typeSel, input('filter', 'filter'),
-    input('night', 'night YYYY-MM-DD'), rigSel,
+    combo('object', 'target', gFacets.object),
+    select('image_type', 'any type', ['light', 'dark', 'flat', 'bias', 'darkflat', 'master', 'unknown']),
+    select('filter', 'any filter', gFacets.filter),
+    input('night', 'night YYYY-MM-DD'),
+    select('camera', 'any camera', gFacets.camera),
+    select('rig', 'any rig', gFacets.rig),
     el('button', { class: 'btn', onclick: () => { bstate.filters = {}; bstate.offset = 0; browse(); } }, 'Clear'),
     el('button', { class: 'btn primary', onclick: () => go('query', { ...f }) }, 'Open in Query →'));
 

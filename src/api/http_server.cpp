@@ -193,12 +193,18 @@ void HttpServer::Impl::routes() {
         }
     });
 
-    // ---- GET /api/v1/rigs  (distinct rigs present in the index, for filters) ----
-    server->Get("/api/v1/rigs", [this](const httplib::Request&, httplib::Response& res) {
+    // ---- GET /api/v1/facets/:field  (distinct values, for Browse dropdowns) ----
+    // Only an allowlisted set of low-cardinality columns, so the field name is
+    // safe to interpolate and the query stays cheap.
+    server->Get(R"(/api/v1/facets/([a-z_]+))", [this](const httplib::Request& req, httplib::Response& res) {
         try {
+            const std::string field = req.matches[1];
+            if (field != "rig" && field != "camera" && field != "filter" && field != "object") {
+                send_error(res, 404, "no such facet"); return;
+            }
             auto d = db();
-            auto rows = d.query("SELECT DISTINCT rig FROM v_frames WHERE rig IS NOT NULL "
-                                "AND rig <> '' ORDER BY rig");
+            auto rows = d.query("SELECT DISTINCT `" + field + "` FROM v_frames WHERE `" + field +
+                                "` IS NOT NULL AND `" + field + "` <> '' ORDER BY `" + field + "`");
             json arr = json::array();
             for (const auto& r : rows) if (r[0]) arr.push_back(*r[0]);
             send_json(res, arr);
