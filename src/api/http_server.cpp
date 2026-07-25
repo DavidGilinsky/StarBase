@@ -193,6 +193,18 @@ void HttpServer::Impl::routes() {
         }
     });
 
+    // ---- GET /api/v1/rigs  (distinct rigs present in the index, for filters) ----
+    server->Get("/api/v1/rigs", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query("SELECT DISTINCT rig FROM v_frames WHERE rig IS NOT NULL "
+                                "AND rig <> '' ORDER BY rig");
+            json arr = json::array();
+            for (const auto& r : rows) if (r[0]) arr.push_back(*r[0]);
+            send_json(res, arr);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     // ---- GET /api/v1/roots ----
     server->Get("/api/v1/roots", [this](const httplib::Request&, httplib::Response& res) {
         try {

@@ -102,6 +102,13 @@ async function loadCuration() {
   catch (_e) { /* keep whatever we had */ }
 }
 
+// Distinct rigs present in the index, for the Browse filter dropdown. Cached;
+// a page reload picks up rigs discovered by a later scan.
+let gRigs = [];
+async function loadRigs() {
+  try { gRigs = await api('/rigs'); } catch (_e) { /* keep whatever we had */ }
+}
+
 // ---- Dashboard -------------------------------------------------------------
 
 async function dashboard() {
@@ -161,18 +168,25 @@ const bstate = { filters: {}, offset: 0, limit: 50, total: 0 };
 
 async function browse(preset) {
   if (preset) { bstate.filters = { ...preset }; bstate.offset = 0; }
+  if (!gRigs.length) await loadRigs();
   const f = bstate.filters;
   const input = (name, ph) => el('input', {
     name, placeholder: ph, value: f[name] || '',
     onchange: (e) => { if (e.target.value) f[name] = e.target.value; else delete f[name]; bstate.offset = 0; browse(); }
   });
-  const typeSel = el('select', { onchange: (e) => { if (e.target.value) f.image_type = e.target.value; else delete f.image_type; bstate.offset = 0; browse(); } },
-    ...['', 'light', 'dark', 'flat', 'bias', 'darkflat', 'master', 'unknown'].map(t =>
-      el('option', { value: t, selected: (f.image_type || '') === t }, t || 'any type')));
+  const select = (name, anyLabel, opts) => {
+    const values = opts.slice();
+    if (f[name] && !values.includes(f[name])) values.unshift(f[name]);  // keep an unknown preset visible
+    return el('select', { onchange: (e) => { if (e.target.value) f[name] = e.target.value; else delete f[name]; bstate.offset = 0; browse(); } },
+      el('option', { value: '', selected: !f[name] }, anyLabel),
+      ...values.map(v => el('option', { value: v, selected: f[name] === v }, v)));
+  };
+  const typeSel = select('image_type', 'any type', ['light', 'dark', 'flat', 'bias', 'darkflat', 'master', 'unknown']);
+  const rigSel = select('rig', 'any rig', gRigs);
 
   const bar = el('div', { class: 'filters' },
     input('object', 'target'), typeSel, input('filter', 'filter'),
-    input('night', 'night YYYY-MM-DD'), input('rig', 'rig'),
+    input('night', 'night YYYY-MM-DD'), rigSel,
     el('button', { class: 'btn', onclick: () => { bstate.filters = {}; bstate.offset = 0; browse(); } }, 'Clear'),
     el('button', { class: 'btn primary', onclick: () => go('query', { ...f }) }, 'Open in Query →'));
 
