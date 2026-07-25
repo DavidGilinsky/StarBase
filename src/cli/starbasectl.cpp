@@ -418,7 +418,8 @@ int main(int argc, char** argv) {
                     std::cout << "  " << st.files_seen << " seen, " << st.files_added << " added, "
                               << st.files_updated << " updated, " << st.files_skipped << " unchanged, "
                               << st.files_settling << " settling, " << st.files_error << " error; "
-                              << st.frames_written << " frames in " << st.duration_ms << " ms\n";
+                              << st.frames_written << " frames, " << st.artifacts_recorded
+                              << " sidecars in " << st.duration_ms << " ms\n";
                 } catch (const std::exception& e) {
                     std::cerr << "  scan failed: " << e.what() << "\n";
                     rc = 1;

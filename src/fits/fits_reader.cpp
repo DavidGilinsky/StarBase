@@ -10,6 +10,8 @@
 // ---------------------------------------------------------------------------
 #include "fits_reader.hpp"
 
+#include "xisf_reader.hpp"
+
 #include <fitsio.h>
 #include <openssl/evp.h>
 
@@ -89,6 +91,11 @@ std::vector<const Hdu*> RawHeader::image_hdus() const {
 }
 
 RawHeader read_header(const std::string& path) {
+    // Signature dispatch: an XISF file is parsed from its own spec, never handed
+    // to CFITSIO. Both paths yield the same RawHeader, so everything downstream
+    // (resolver, fingerprint, frame store) is format-agnostic.
+    if (is_xisf(path)) return read_xisf(path);
+
     FitsHandle fh;
     int status = 0;
 

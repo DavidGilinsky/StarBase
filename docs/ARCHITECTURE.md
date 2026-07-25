@@ -190,12 +190,26 @@ hand-rolled 2880-byte block reader would not. Multi-HDU files yield one `frames`
 row per image HDU.
 
 **XISF** by parsing the open XISF spec directly: 16-byte signature
-(`XISF0100` + header length), then an XML header block. A small vendored pull
-parser (pugixml or tinyxml2) handles it. No PixInsight code is involved.
+(`XISF0100` + little-endian header length), then an XML header block.
+*Implemented (M9)* in `src/fits/xisf_reader.cpp` with a focused scanner over
+the header's `<Image>` and `<FITSKeyword>` elements rather than a full XML
+dependency, keeping third-party surface to just httplib + nlohmann. It yields
+the same `RawHeader` the CFITSIO path does (`<Image>` geometry -> NAXIS1/NAXIS2,
+`sampleFormat` -> BITPIX, embedded `FITSKeyword`s -> cards with FITS quotes
+stripped and XML entities decoded), so the resolver, fingerprint, and frame
+store are format-agnostic; `read_header` dispatches on the signature. No
+PixInsight code is involved. Validated against all 294 real XISF masters in the
+archive (0 failures).
 
-**Sidecars** (`.txt`/`.json`/`.csv` logs written alongside frames, NINA/TSX
-artifacts) are recorded in an `artifacts` table linked to the frame or the
-containing session directory, not parsed for metadata in v1.
+**Sidecars** (`.txt`/`.json`/`.csv`/`.log` logs written alongside frames,
+NINA/TSX artifacts) are recorded in an `artifacts` table, not parsed for
+metadata in v1. *Implemented (M9)*: the walk enqueues sidecar-class files, the
+worker upserts each artifact row, and a post-pass reconciliation links a sidecar
+to a same-directory frame sharing its stem (the concurrent walk can record a
+sidecar before its sibling frame exists, so linking is deferred to after the
+pass rather than raced inline). A session log with no matching stem stays
+unlinked, associated with its directory by `rel_path`. A frame's sidecars are
+surfaced on `GET /api/v1/frames/:id`.
 
 **Header mapping is a data file** (`config/headermap.conf`), listing per logical
 field an ordered list of candidate keywords plus value normalizations:

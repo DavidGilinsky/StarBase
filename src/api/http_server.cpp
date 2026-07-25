@@ -210,6 +210,13 @@ void HttpServer::Impl::routes() {
             auto kw = d.query("SELECT keyword, value, comment FROM frame_keywords "
                               "WHERE frame_id = " + id + " ORDER BY ord");
             frame["keywords"] = rows_to_json(kw, {"keyword", "value", "comment"});
+
+            // Sidecars/logs recorded alongside this frame (M9).
+            auto arts = d.query("SELECT kind, filename, rel_path, size_bytes, "
+                                "DATE_FORMAT(mtime_utc,'%Y-%m-%dT%H:%i:%sZ') FROM artifacts "
+                                "WHERE frame_id = " + id + " ORDER BY filename");
+            frame["artifacts"] =
+                rows_to_json(arts, {"kind", "filename", "rel_path", "size_bytes", "mtime"});
             send_json(res, frame);
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
@@ -592,6 +599,7 @@ void HttpServer::Impl::routes() {
                                    {"settling", st.files_settling},
                                    {"error", st.files_error},
                                    {"frames", st.frames_written},
+                                   {"sidecars", st.artifacts_recorded},
                                    {"ms", st.duration_ms}});
             }
             send_json(res, results);

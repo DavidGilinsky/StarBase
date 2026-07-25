@@ -49,6 +49,7 @@ struct ScanStats {
     long files_settling = 0;   // too young; deferred to next pass
     long files_error = 0;      // unreadable/parse failure (recorded as status=error)
     long frames_written = 0;
+    long artifacts_recorded = 0;  // sidecars/logs indexed into the artifacts table
     long long duration_ms = 0;
 };
 

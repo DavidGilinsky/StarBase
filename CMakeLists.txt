@@ -71,7 +71,7 @@ if(SB_WITH_FITS)
     find_package(OpenSSL REQUIRED)  # MD5 for the identity fingerprint
     message(STATUS "CFITSIO: ${CFITSIO_VERSION}")
 
-    add_library(sb_fits STATIC src/fits/fits_reader.cpp)
+    add_library(sb_fits STATIC src/fits/fits_reader.cpp src/fits/xisf_reader.cpp)
     target_include_directories(sb_fits PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/fits
         ${CFITSIO_INCLUDE_DIRS})
@@ -206,6 +206,12 @@ if(SB_BUILD_TESTS)
         target_link_libraries(fits_test PRIVATE sb_fits ${CFITSIO_LIBRARIES})
         target_include_directories(fits_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
         add_test(NAME fits_test COMMAND fits_test)
+
+        # XISF parser builds its own test files; no archive, no database.
+        add_executable(xisf_test tests/xisf_test.cpp)
+        target_link_libraries(xisf_test PRIVATE sb_fits ${CFITSIO_LIBRARIES})
+        target_include_directories(xisf_test PRIVATE ${CFITSIO_INCLUDE_DIRS})
+        add_test(NAME xisf_test COMMAND xisf_test)
 
         add_executable(resolver_test tests/resolver_test.cpp)
         target_link_libraries(resolver_test PRIVATE sb_extract ${CFITSIO_LIBRARIES})

@@ -93,7 +93,29 @@ struct WorkItem {
     std::string rel_path;
     std::string filename;
     std::string ext;
+    std::string artifact_kind;  // empty => a frame; else the artifacts.kind value
 };
+
+// Sidecars and logs written alongside frames (NINA/TheSkyX/ASIAIR). Recorded in
+// the artifacts table, not parsed for metadata in v1. Anything not a frame and
+// not listed here is ignored by the walk.
+std::string artifact_kind_for(const std::string& ext) {
+    const std::string e = lower(ext);
+    if (e == ".txt" || e == ".json") return "sidecar";
+    if (e == ".log") return "log";
+    if (e == ".csv") return "csv";
+    return "";
+}
+
+// LIKE wildcards in a literal path prefix, escaped for MariaDB's default '\'.
+std::string escape_like(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        if (c == '\\' || c == '%' || c == '_') out += '\\';
+        out += c;
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -111,7 +133,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
 
     BoundedQueue<WorkItem> queue(static_cast<std::size_t>(cfg.queue_depth));
     std::atomic<long> seen{0}, added{0}, updated{0}, skipped{0}, settling{0}, errored{0},
-        frames{0};
+        frames{0}, arts{0};
     const std::string root_path = root.path;
     const long settle = cfg.settle_seconds;
     auto stop_requested = [&] { return cfg.stop && cfg.stop->load(); };
@@ -158,6 +180,32 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
             if (now - st.st_mtime < settle) { settling.fetch_add(1); continue; }
 
             const std::string mtime = utc_from_epoch(st.st_mtim.tv_sec, st.st_mtim.tv_nsec);
+
+            // Sidecars/logs are recorded, never parsed. Frame linkage is left to
+            // a post-pass reconciliation: the concurrent walk can record a
+            // sidecar before its sibling frame's row exists, so linking here
+            // would race. Preserve any existing link on re-scan.
+            if (!item->artifact_kind.empty()) {
+                try {
+                    const std::string hp =
+                        cfg.case_sensitive ? item->rel_path : lower(item->rel_path);
+                    const std::string hsql = "UNHEX(MD5('" + db.escape(hp) + "'))";
+                    db.exec(
+                        "INSERT INTO artifacts (root_id, rel_path, rel_path_hash, filename, "
+                        "kind, size_bytes, mtime_utc, last_seen_utc) VALUES (" +
+                        std::to_string(root.id) + ", '" + db.escape(item->rel_path) + "', " +
+                        hsql + ", '" + db.escape(item->filename) + "', '" +
+                        db.escape(item->artifact_kind) + "', " +
+                        std::to_string(static_cast<long long>(st.st_size)) + ", '" + mtime +
+                        "', UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE "
+                        "kind=VALUES(kind), size_bytes=VALUES(size_bytes), "
+                        "mtime_utc=VALUES(mtime_utc), last_seen_utc=UTC_TIMESTAMP()");
+                    arts.fetch_add(1);
+                } catch (const std::exception&) {
+                    errored.fetch_add(1);  // a bad sidecar is a nuisance, not fatal
+                }
+                continue;
+            }
 
             // Cheap change detection: an unchanged file (size + mtime) is not
             // reparsed, which is what makes a re-sweep of a large archive nearly
@@ -247,7 +295,9 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
         }
         if (!it->is_regular_file(ec)) continue;
         const std::string ext = it->path().extension().string();
-        if (!is_indexable(ext)) continue;
+        const bool frame = is_indexable(ext);
+        const std::string kind = frame ? std::string() : artifact_kind_for(ext);
+        if (!frame && kind.empty()) continue;  // neither a frame nor a sidecar
 
         WorkItem w;
         w.abs_path = it->path().string();
@@ -255,10 +305,41 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
         if (ec) { ec.clear(); w.rel_path = name; }
         w.filename = name;
         w.ext = ext;
+        w.artifact_kind = kind;
         queue.push(std::move(w));
     }
     queue.close();
     for (auto& t : pool) t.join();
+
+    // Link sidecars to frames now that every frame in this pass is committed.
+    // Match a same-directory frame whose name shares the sidecar's stem
+    // (frame001.xisf <- frame001.txt); NINA/TSX session logs with no matching
+    // stem simply stay unlinked, associated with their directory by rel_path.
+    if (arts.load() > 0) {
+        try {
+            db::Database db(db_config);
+            auto un = db.query("SELECT id, rel_path, filename FROM artifacts WHERE root_id = " +
+                               std::to_string(root.id) + " AND frame_id IS NULL");
+            for (const auto& r : un) {
+                if (!r[0] || !r[1] || !r[2]) continue;
+                const std::string relp = *r[1], fname = *r[2];
+                const auto dot = fname.rfind('.');
+                const auto slash = relp.rfind('/');
+                const std::string dir =
+                    slash == std::string::npos ? "" : relp.substr(0, slash + 1);
+                const std::string stem =
+                    dot == std::string::npos ? fname : fname.substr(0, dot);
+                auto fr = db.query(
+                    "SELECT fr.id FROM files fl JOIN frames fr ON fr.file_id = fl.id "
+                    "WHERE fl.root_id = " + std::to_string(root.id) +
+                    " AND fl.format IN ('fits','xisf') AND fl.rel_path LIKE '" +
+                    db.escape(escape_like(dir + stem)) + ".%' ORDER BY fr.id LIMIT 1");
+                if (!fr.empty() && fr[0][0])
+                    db.exec("UPDATE artifacts SET frame_id = " + std::string(*fr[0][0]) +
+                            " WHERE id = " + std::string(*r[0]));
+            }
+        } catch (const std::exception&) { /* linking is best-effort */ }
+    }
 
     stats.files_seen = seen.load();
     stats.files_added = added.load();
@@ -267,6 +348,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     stats.files_settling = settling.load();
     stats.files_error = errored.load();
     stats.frames_written = frames.load();
+    stats.artifacts_recorded = arts.load();
     stats.duration_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
     return stats;
