@@ -595,10 +595,17 @@ destructive filesystem ops behind a default-on dry-run. A **Jobs** view lists
 the ledger and drills into per-item results, offering the launcher download for
 WBPP jobs. Views are hash-routed (`#query`, `#jobs`, …) so they are
 bookmarkable; an optional API token is held in `localStorage` and sent as a
-bearer header for the write endpoints. Still unbuilt: Collections & Tags (no
-backend yet), a Roots & Settings editor (only `GET /roots` + `POST /scan`
-exist), Users (token-only today; PBKDF2 users from NightWatcher2 not ported),
-and a Database tab.
+bearer header for the write endpoints. The **Roots & Settings** tab manages
+monitored trees: add a root (the filesystem is probed for type, case-folding,
+and inotify support, as the CLI does), edit each root's settings (enabled,
+writable, watch mode, scan interval, settle seconds, ignore globs), scan one or
+all, and remove. This closed two backend gaps the page exposed: the scanner now
+writes its pass back into the root's bookkeeping (`last_scan_status`,
+`last_scan_end`, `file_count`) instead of leaving a permanent "never", and it
+now honours each root's own `ignore_globs` (carried on `RootRow`, split on comma
+or newline) rather than only the config default. Still unbuilt: Collections &
+Tags (no backend yet), Users (token-only today; PBKDF2 users from NightWatcher2
+not ported), and a Database tab.
 
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:

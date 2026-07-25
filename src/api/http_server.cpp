@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -20,6 +21,7 @@
 
 #include "action.hpp"
 #include "calibration.hpp"
+#include "fsinfo.hpp"
 #include "logging.hpp"
 #include "mapping_loader.hpp"
 #include "query.hpp"
@@ -127,16 +129,101 @@ void HttpServer::Impl::routes() {
     server->Get("/api/v1/roots", [this](const httplib::Request&, httplib::Response& res) {
         try {
             auto d = db();
-            const std::vector<std::string> cols = {"id",       "label",     "path",
-                                                   "enabled",  "writable",  "fs_type",
-                                                   "watch_mode", "file_count", "last_scan_status"};
+            const std::vector<std::string> cols = {
+                "id", "label", "path", "enabled", "writable", "case_sensitive",
+                "fs_type", "watch_mode", "scan_interval_s", "settle_seconds",
+                "ignore_globs", "file_count", "last_scan_status",
+                "last_scan_end", "last_scan_error"};
             auto rows = d.query(
-                "SELECT id, label, path, enabled, writable, fs_type, watch_mode, file_count, "
-                "last_scan_status FROM roots ORDER BY label");
+                "SELECT id, label, path, enabled, writable, case_sensitive, fs_type, "
+                "watch_mode, scan_interval_s, settle_seconds, ignore_globs, file_count, "
+                "last_scan_status, "
+                "DATE_FORMAT(last_scan_end,'%Y-%m-%dT%H:%i:%sZ'), last_scan_error "
+                "FROM roots ORDER BY label");
             send_json(res, rows_to_json(rows, cols));
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
         }
+    });
+
+    // ---- POST /api/v1/roots  (register a directory tree; token-gated) ----
+    // Body: {"label":"lights","path":"/abs/dir", optional writable/enabled/
+    //        watch_mode/scan_interval_s/settle_seconds/ignore_globs}. The
+    //        filesystem is probed (type, case-folding, inotify) like the CLI.
+    server->Post("/api/v1/roots", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            json body = json::parse(req.body);
+            const std::string label = body.value("label", "");
+            std::string path = body.value("path", "");
+            if (label.empty() || path.empty()) { send_error(res, 400, "label and path are required"); return; }
+
+            std::error_code ec;
+            auto canon = std::filesystem::weakly_canonical(path, ec);
+            if (!ec) path = canon.string();
+            if (!std::filesystem::is_directory(path, ec)) {
+                send_error(res, 400, "not a readable directory: " + path); return;
+            }
+            const std::string fs_type = starbase::fs::detect_fs_type(path);
+            const bool watchable = starbase::fs::supports_inotify(fs_type);
+            const bool case_sensitive = starbase::fs::detect_case_sensitive(path);
+
+            db::RootFields f;
+            f.fs_type = fs_type;
+            f.case_sensitive = case_sensitive;
+            f.watch_mode = body.contains("watch_mode") ? body["watch_mode"].get<std::string>()
+                                                       : std::string(watchable ? "auto" : "poll");
+            if (body.contains("writable")) f.writable = body["writable"].get<bool>();
+            if (body.contains("enabled")) f.enabled = body["enabled"].get<bool>();
+            if (body.contains("scan_interval_s")) f.scan_interval_s = body["scan_interval_s"].get<int>();
+            if (body.contains("settle_seconds")) f.settle_seconds = body["settle_seconds"].get<int>();
+            if (body.contains("ignore_globs")) f.ignore_globs = body["ignore_globs"].get<std::string>();
+
+            int id;
+            try { id = d.add_root(label, path, f); }
+            catch (const db::DbError& de) {
+                // 1062 = duplicate key: the label or path is already registered.
+                send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return;
+            }
+            send_json(res, json{{"id", id}, {"label", label}, {"path", path},
+                                {"fs_type", fs_type}, {"case_sensitive", case_sensitive},
+                                {"watch_mode", *f.watch_mode}, {"watchable", watchable}});
+        } catch (const json::exception& e) {
+            send_error(res, 400, std::string("invalid JSON: ") + e.what());
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- PATCH /api/v1/roots/:label  (change settings; token-gated) ----
+    server->Patch(R"(/api/v1/roots/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            const std::string label = req.matches[1];
+            json body = json::parse(req.body);
+            db::RootFields f;
+            if (body.contains("enabled")) f.enabled = body["enabled"].get<bool>();
+            if (body.contains("writable")) f.writable = body["writable"].get<bool>();
+            if (body.contains("case_sensitive")) f.case_sensitive = body["case_sensitive"].get<bool>();
+            if (body.contains("watch_mode")) f.watch_mode = body["watch_mode"].get<std::string>();
+            if (body.contains("scan_interval_s")) f.scan_interval_s = body["scan_interval_s"].get<int>();
+            if (body.contains("settle_seconds")) f.settle_seconds = body["settle_seconds"].get<int>();
+            if (body.contains("ignore_globs")) f.ignore_globs = body["ignore_globs"].get<std::string>();
+            if (!d.update_root(label, f)) { send_error(res, 404, "no such root"); return; }
+            send_json(res, json{{"updated", label}});
+        } catch (const json::exception& e) {
+            send_error(res, 400, std::string("invalid JSON: ") + e.what());
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- DELETE /api/v1/roots/:label  (unregister; indexed rows cascade) ----
+    server->Delete(R"(/api/v1/roots/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            if (!d.remove_root(req.matches[1])) { send_error(res, 404, "no such root"); return; }
+            send_json(res, json{{"deleted", std::string(req.matches[1])}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- GET /api/v1/frames  (paginated, filtered browse) ----

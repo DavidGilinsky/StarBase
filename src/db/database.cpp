@@ -220,8 +220,8 @@ int Database::add_root(const std::string& label, const std::string& path,
         const unsigned int e = mysql_errno(impl_->conn);
         const std::string msg = mysql_error(impl_->conn);
         if (e == 1062)  // ER_DUP_ENTRY
-            throw DbError("a root with that label or path already exists (" + msg + ")");
-        throw DbError("add_root: " + msg);
+            throw DbError("a root with that label or path already exists (" + msg + ")", e);
+        throw DbError("add_root: " + msg, e);
     }
     return static_cast<int>(mysql_insert_id(impl_->conn));
 }
@@ -239,17 +239,18 @@ RootRow row_to_root(MYSQL_ROW row) {
     r.watch_mode       = opt_str(row[6]);
     r.scan_interval_s  = row[7] ? std::atoi(row[7]) : 0;
     r.settle_seconds   = row[8] ? std::atoi(row[8]) : 0;
-    r.fs_type          = opt_str(row[9]);
-    r.last_scan_status = opt_str(row[10]);
-    r.last_scan_end    = opt_str(row[11]);
-    r.last_scan_error  = opt_str(row[12]);
-    r.file_count       = row[13] ? std::atoll(row[13]) : 0;
+    r.ignore_globs     = opt_str(row[9]);
+    r.fs_type          = opt_str(row[10]);
+    r.last_scan_status = opt_str(row[11]);
+    r.last_scan_end    = opt_str(row[12]);
+    r.last_scan_error  = opt_str(row[13]);
+    r.file_count       = row[14] ? std::atoll(row[14]) : 0;
     return r;
 }
 
 constexpr const char* kRootColumns =
     "id, label, path, enabled, writable, case_sensitive, watch_mode, "
-    "scan_interval_s, settle_seconds, fs_type, last_scan_status, "
+    "scan_interval_s, settle_seconds, ignore_globs, fs_type, last_scan_status, "
     "last_scan_end, last_scan_error, file_count";
 
 }  // namespace

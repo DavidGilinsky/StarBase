@@ -43,6 +43,7 @@ struct RootRow {
     std::string watch_mode = "auto";   // auto | inotify | poll | off
     int         scan_interval_s = 3600;
     int         settle_seconds = 30;
+    std::string ignore_globs;          // comma/newline separated; empty = default
     std::string fs_type;
     std::string last_scan_status = "never";
     std::string last_scan_end;

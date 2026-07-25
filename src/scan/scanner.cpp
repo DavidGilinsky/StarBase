@@ -138,6 +138,23 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     const long settle = cfg.settle_seconds;
     auto stop_requested = [&] { return cfg.stop && cfg.stop->load(); };
 
+    // Effective ignore globs: the root's own list wins (edited from the UI or
+    // CLI), split on comma or newline and trimmed; otherwise whatever the caller
+    // seeded in cfg. Doing it once here keeps the walk to plain membership tests.
+    std::vector<std::string> ignore = cfg.ignore_globs;
+    if (!root.ignore_globs.empty()) {
+        ignore.clear();
+        std::string cur;
+        auto flush = [&] {
+            const auto b = cur.find_first_not_of(" \t\r");
+            const auto e = cur.find_last_not_of(" \t\r");
+            if (b != std::string::npos) ignore.push_back(cur.substr(b, e - b + 1));
+            cur.clear();
+        };
+        for (char c : root.ignore_globs) { if (c == ',' || c == '\n') flush(); else cur += c; }
+        flush();
+    }
+
     // Load the equipment registry once and share it read-only. Its default site
     // supplies the observing-night offset: without this the night would roll at
     // UTC noon instead of the observatory's local noon, mis-labelling frames
@@ -289,7 +306,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
         if (stop_requested()) break;
 
         const std::string name = it->path().filename().string();
-        if (matches_ignore(name, cfg.ignore_globs)) {
+        if (matches_ignore(name, ignore)) {
             if (it->is_directory(ec)) it.disable_recursion_pending();  // prune the subtree
             continue;
         }
@@ -351,6 +368,25 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     stats.artifacts_recorded = arts.load();
     stats.duration_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+
+    // Write the pass back into the root's bookkeeping so the UI and list-roots
+    // show real status and counts instead of a permanent "never". file_count is
+    // the frames currently indexed cleanly under this root.
+    try {
+        db::Database rdb(db_config);
+        long long fc = 0;
+        auto r = rdb.query("SELECT COUNT(*) FROM files WHERE root_id = " +
+                           std::to_string(root.id) + " AND status = 'ok'");
+        if (!r.empty() && r[0][0]) fc = std::stoll(*r[0][0]);
+        const bool ok = stats.files_error == 0;
+        rdb.exec("UPDATE roots SET last_scan_end = UTC_TIMESTAMP(), last_scan_status = '" +
+                 std::string(ok ? "ok" : "error") + "', last_scan_error = " +
+                 (ok ? std::string("NULL")
+                     : "'" + rdb.escape(std::to_string(stats.files_error) +
+                                        " file(s) failed to index") + "'") +
+                 ", file_count = " + std::to_string(fc) +
+                 " WHERE id = " + std::to_string(root.id));
+    } catch (const std::exception&) { /* bookkeeping is best-effort */ }
     return stats;
 }
 

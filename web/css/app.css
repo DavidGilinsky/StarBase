@@ -151,3 +151,9 @@ textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monosp
 .calgroup { margin: .5rem 0; padding: .5rem; background: var(--bg); border: 1px solid var(--edge); border-radius: 8px; }
 .calgroup table { margin-top: .3rem; }
 b.warn { color: var(--warn); }
+
+/* roots & settings */
+.rootcard .rootgrid { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center; margin-top: .5rem; }
+.rootcard .rootgrid label { display: inline-flex; align-items: center; gap: .3rem; }
+.rootcard textarea { max-width: 32rem; }
+.stat.never { color: var(--dim); }

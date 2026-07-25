@@ -30,6 +30,10 @@ const apiPostText = (path, body) => fetch('/api/v1' + path, {
   method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
   body: JSON.stringify(body)
 }).then(r => r.ok ? r.text() : asError(r));
+const apiPatch = (path, body) => fetch('/api/v1' + path, {
+  method: 'PATCH', headers: authHeaders({ 'Content-Type': 'application/json' }),
+  body: JSON.stringify(body)
+}).then(r => r.ok ? r.json() : asError(r));
 const apiDelete = (path) => fetch('/api/v1' + path, { method: 'DELETE', headers: authHeaders() })
   .then(r => r.ok ? r.json() : asError(r));
 
@@ -49,6 +53,7 @@ const app = document.getElementById('app');
 const drawer = document.getElementById('detail');
 const fmt = (v, d = '-') => (v == null || v === '') ? d : v;
 const num = (v, dp = 0) => v == null || v === '' ? '-' : Number(v).toFixed(dp);
+const truthy = (v) => v === true || v === 1 || v === '1';
 
 function download(filename, content, type) {
   const blob = new Blob([content], { type: type || 'text/plain' });
@@ -587,6 +592,99 @@ async function detail(id) {
   } catch (e) { drawer.replaceChildren(el('div', { class: 'err-msg' }, String(e.message || e))); }
 }
 
+// ---- Roots & Settings ------------------------------------------------------
+
+async function runScan(label, statusEl) {
+  statusEl.replaceChildren(el('span', { class: 'muted' }, label ? `scanning ${label}…` : 'scanning all roots…'));
+  try {
+    const q = label ? '?root=' + encodeURIComponent(label) : '';
+    const results = await apiPost('/scan' + q, {});
+    const parts = results.map(x => `${x.root}: ${x.added} added, ${x.updated} updated, ${x.unchanged} same, ${x.frames} frames, ${x.sidecars} sidecars (${x.ms} ms)`);
+    statusEl.replaceChildren(el('span', { class: 'ok-msg' }, parts.join(' · ') || 'nothing to scan'));
+  } catch (e) { statusEl.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+}
+
+function addRootForm() {
+  const label = el('input', { placeholder: 'label, e.g. lights', style: 'width:10em' });
+  const path = el('input', { placeholder: '/absolute/path', style: 'flex:1;min-width:16em' });
+  const writable = el('input', { type: 'checkbox' });
+  const status = el('span', {});
+  return el('div', { class: 'card' },
+    el('h3', {}, 'Add a root'),
+    el('div', { class: 'row' }, label, path,
+      el('label', {}, writable, ' writable'),
+      el('button', { class: 'btn primary', onclick: async () => {
+        if (!label.value.trim() || !path.value.trim()) { status.replaceChildren(el('span', { class: 'err-msg' }, 'label and path are required')); return; }
+        status.replaceChildren(el('span', { class: 'muted' }, 'probing filesystem…'));
+        try {
+          const r = await apiPost('/roots', { label: label.value.trim(), path: path.value.trim(), writable: writable.checked });
+          status.replaceChildren(el('span', { class: 'ok-msg' }, `added #${r.id}: ${r.fs_type}, ${r.watchable ? 'inotify' : 'poll'}, ${truthy(r.case_sensitive) ? 'case-sensitive' : 'case-folding'}`));
+          setTimeout(roots, 800);
+        } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Add')),
+    el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Registering probes the filesystem for type, case-folding, and inotify support, then indexes on the next scan.'),
+    status);
+}
+
+function rootCard(r) {
+  const enabled = el('input', { type: 'checkbox', checked: truthy(r.enabled) });
+  const writable = el('input', { type: 'checkbox', checked: truthy(r.writable) });
+  const watch = el('select', {}, ...['auto', 'inotify', 'poll', 'off'].map(m => el('option', { value: m, selected: r.watch_mode === m }, m)));
+  const interval = el('input', { type: 'number', value: r.scan_interval_s, style: 'width:7em' });
+  const settle = el('input', { type: 'number', value: r.settle_seconds, style: 'width:6em' });
+  const globs = el('textarea', { rows: 2, placeholder: '_gsdata_\n*.tmp\n*.part' }, fmt(r.ignore_globs, ''));
+  const status = el('span', {});
+  return el('div', { class: 'card rootcard' },
+    el('div', { class: 'row section' },
+      el('div', {}, el('b', {}, r.label), ' ', el('span', { class: 'stat ' + r.last_scan_status }, r.last_scan_status),
+        r.last_scan_end ? el('span', { class: 'muted' }, ' · last ' + r.last_scan_end) : null),
+      el('div', { class: 'muted' }, `${Number(r.file_count).toLocaleString()} files${r.fs_type ? ' · ' + r.fs_type : ''}`)),
+    el('div', { class: 'muted mono', style: 'word-break:break-all;margin:.2rem 0' }, r.path),
+    r.last_scan_error ? el('div', { class: 'warn-msg' }, '⚠ ' + r.last_scan_error) : null,
+    el('div', { class: 'rootgrid' },
+      el('label', {}, enabled, ' enabled'),
+      el('label', {}, writable, ' writable (allow filesystem ops)'),
+      el('span', {}, 'watch ', watch),
+      el('span', {}, 'scan every ', interval, ' s'),
+      el('span', {}, 'settle ', settle, ' s')),
+    el('label', { class: 'muted', style: 'display:block;margin-top:.5rem' }, 'ignore globs (one per line)'),
+    globs,
+    el('div', { class: 'row', style: 'margin-top:.5rem' },
+      el('button', { class: 'btn primary', onclick: async () => {
+        status.replaceChildren(el('span', { class: 'muted' }, 'saving…'));
+        try {
+          await apiPatch('/roots/' + encodeURIComponent(r.label), {
+            enabled: enabled.checked, writable: writable.checked, watch_mode: watch.value,
+            scan_interval_s: Number(interval.value), settle_seconds: Number(settle.value),
+            ignore_globs: globs.value,
+          });
+          status.replaceChildren(el('span', { class: 'ok-msg' }, 'saved'));
+        } catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Save'),
+      el('button', { class: 'btn', onclick: () => runScan(r.label, status) }, 'Scan now'),
+      el('button', { class: 'btn danger', onclick: async () => {
+        if (!confirm(`Remove root "${r.label}"? Its indexed rows are deleted (files on disk are untouched).`)) return;
+        try { await apiDelete('/roots/' + encodeURIComponent(r.label)); roots(); }
+        catch (e) { status.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Remove'),
+      status));
+}
+
+async function roots() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading roots…'));
+  try {
+    const list = await api('/roots');
+    const scanStatus = el('span', {});
+    const host = el('div', {},
+      el('div', { class: 'row section' }, el('h2', {}, 'Roots & Settings'),
+        el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: () => runScan(null, scanStatus) }, 'Scan all'), scanStatus)),
+      addRootForm());
+    if (!list.length) host.append(el('div', { class: 'muted' }, 'No roots registered. Add one above.'));
+    for (const r of list) host.append(rootCard(r));
+    app.replaceChildren(host);
+  } catch (e) { showError(e); }
+}
+
 // ---- shell / router --------------------------------------------------------
 
 function setConn(t) { const c = document.getElementById('conn'); c.textContent = t; c.classList.remove('err'); }
@@ -595,7 +693,7 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs };
+const VIEWS = { dashboard, browse, query, jobs, roots };
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';
