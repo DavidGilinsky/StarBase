@@ -241,7 +241,7 @@ function presetToConds(p) {
   const conds = [];
   if (p.__tag) conds.push({ field: 'tag', op: 'tagged', value: p.__tag });
   if (p.__collection) conds.push({ field: 'collection', op: 'in_collection', value: p.__collection });
-  const m = { object: 'object', image_type: 'image_type', filter: 'filter', night: 'session_night', rig: 'rig', file_status: 'file_status' };
+  const m = { object: 'object', image_type: 'image_type', filter: 'filter', night: 'session_night', rig: 'rig', site: 'site', file_status: 'file_status' };
   for (const [k, field] of Object.entries(m))
     if (p[k]) conds.push({ field, op: field === 'object' || field === 'filter' || field === 'rig' ? 'like' : 'eq', value: p[k] });
   return conds;
@@ -1029,10 +1029,14 @@ async function database() {
 
 // ---- Equipment (admin): build rigs from camera + focal-length combos --------
 
+let siteDist = 250;  // metres; the user-adjustable site clustering distance
+
 async function equipment() {
   app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
   try {
     const j = await api('/equipment');
+    let sug = { clusters: [] };
+    try { sug = await api('/equipment/site-suggestions?distance=' + siteDist); } catch (_e) { /* needs frames */ }
     const rnd = (v) => Math.round(Number(v));
     const parts = [el('h2', {}, 'Equipment')];
 
@@ -1044,14 +1048,16 @@ async function equipment() {
         const tel = el('input', { placeholder: 'telescope (optional)', style: 'width:11em' });
         const fmin = el('input', { type: 'number', value: s.suggest_min, style: 'width:6em' });
         const fmax = el('input', { type: 'number', value: s.suggest_max, style: 'width:6em' });
+        const site = el('select', {}, el('option', { value: '' }, '(no site)'),
+          ...j.sites.map(x => el('option', { value: x.id }, x.name)));
         return el('div', { class: 'rigrow' },
           el('div', { style: 'min-width:14em' }, el('b', {}, s.camera),
             el('span', { class: 'muted' }, ` · ${rnd(s.focal_min)}–${rnd(s.focal_max)} mm · ${Number(s.frames).toLocaleString()} frames`)),
-          name, tel, el('span', { class: 'muted' }, 'range'), fmin, el('span', { class: 'muted' }, '–'), fmax,
+          name, tel, el('span', { class: 'muted' }, 'range'), fmin, el('span', { class: 'muted' }, '–'), fmax, site,
           el('button', { class: 'btn primary', onclick: async () => {
             if (!name.value.trim()) { sstatus.replaceChildren(el('span', { class: 'err-msg' }, 'name required')); return; }
             try {
-              const r = await apiPost('/equipment/rigs', { name: name.value.trim(), camera_id: s.camera_id, telescope: tel.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value) });
+              const r = await apiPost('/equipment/rigs', { name: name.value.trim(), camera_id: s.camera_id, telescope: tel.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value), site_id: site.value ? Number(site.value) : 0 });
               sstatus.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.name}; assigned ${Number(r.assigned).toLocaleString()} frame(s)`));
               equipment();
             } catch (e) { sstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
@@ -1083,6 +1089,46 @@ async function equipment() {
         } }, '✕'));
     }) : [el('div', { class: 'muted' }, 'No rigs yet. Create them from the suggestions above.')];
     parts.push(el('div', { class: 'card' }, el('h3', {}, 'Rigs'), el('div', { class: 'culist' }, ...rrows)));
+
+    // Sites: existing + location-clustered suggestions.
+    const sstatus2 = el('div', {});
+    const srrows = j.sites.length ? j.sites.map(s => el('div', { class: 'rigrow' },
+      el('b', {}, s.name),
+      el('span', { class: 'muted' }, `${num(s.latitude, 5)}, ${num(s.longitude, 5)}${s.timezone ? ' · ' + s.timezone : ''}`),
+      el('span', { class: 'muted' }, `${Number(s.frames).toLocaleString()} frames`),
+      el('button', { class: 'link', onclick: () => go('query', { site: s.name }) }, 'query →'),
+      el('button', { class: 'btn ghost', title: 'delete site', onclick: async () => {
+        if (!confirm(`Delete site "${s.name}"? Frames keep their files; their site is cleared.`)) return;
+        try { await apiDelete('/equipment/sites/' + s.id); equipment(); } catch (e) { alert(String(e.message || e)); }
+      } }, '✕')))
+      : [el('div', { class: 'muted' }, 'No sites yet. Create them from the location clusters below.')];
+
+    const distInput = el('input', { type: 'number', value: siteDist, style: 'width:7em' });
+    const clusterRows = (sug.clusters || []).map(c => {
+      if (c.covered_by) return el('div', { class: 'rigrow muted' },
+        `${num(c.latitude, 5)}, ${num(c.longitude, 5)} · ${Number(c.frames).toLocaleString()} frames`,
+        el('span', { class: 'tagchip' }, '📍 ' + c.covered_by));
+      const name = el('input', { placeholder: 'site name', style: 'width:12em' });
+      const tz = el('input', { placeholder: 'timezone (optional)', value: 'America/Phoenix', style: 'width:12em' });
+      return el('div', { class: 'rigrow' },
+        el('span', { class: 'muted', style: 'min-width:16em' }, `${num(c.latitude, 5)}, ${num(c.longitude, 5)} · ${Number(c.frames).toLocaleString()} frames`),
+        name, tz,
+        el('button', { class: 'btn primary', onclick: async () => {
+          if (!name.value.trim()) { sstatus2.replaceChildren(el('span', { class: 'err-msg' }, 'name required')); return; }
+          try {
+            const r = await apiPost('/equipment/sites', { name: name.value.trim(), latitude: c.latitude, longitude: c.longitude, distance_m: siteDist, timezone: tz.value.trim() });
+            sstatus2.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.name}; assigned ${Number(r.assigned).toLocaleString()} frame(s)`));
+            equipment();
+          } catch (e) { sstatus2.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+        } }, 'Create site'));
+    });
+
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Sites'), el('div', { class: 'culist' }, ...srrows)));
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Location clusters'),
+      el('div', { class: 'row' }, el('span', { class: 'muted' }, 'Group frames within'), distInput, el('span', { class: 'muted' }, 'metres of each other'),
+        el('button', { class: 'btn', onclick: () => { siteDist = Math.max(1, Number(distInput.value) || 250); equipment(); } }, 'Re-cluster')),
+      el('div', { class: 'muted', style: 'margin:.3rem 0' }, 'Observatory locations found in your frame headers. Name a cluster to create a site and assign its frames.'),
+      el('div', { class: 'culist' }, ...(clusterRows.length ? clusterRows : [el('div', { class: 'muted' }, 'No located frames (need OBSGEO/SITELAT headers, and a scan).')])), sstatus2));
 
     // Cameras (auto-detected, for context).
     parts.push(el('div', { class: 'card' }, el('h3', {}, 'Cameras (auto-detected on scan)'),

@@ -108,6 +108,38 @@ std::string get_cookie(const httplib::Request& req, const std::string& name) {
     return std::string();
 }
 
+// A frame's observatory location, read from the raw header cards (OBSGEO first,
+// then the SITE*/*-OBS fallbacks). OBSGEO-* are signed decimal degrees.
+struct FrameLoc { long long id; double lat, lon; };
+std::vector<FrameLoc> frame_locations(db::Database& d) {
+    auto rows = d.query(
+        "SELECT f.id, "
+        "(SELECT k.value FROM frame_keywords k WHERE k.frame_id=f.id AND k.keyword IN "
+        "('OBSGEO-B','SITELAT','LAT-OBS') ORDER BY FIELD(k.keyword,'OBSGEO-B','SITELAT','LAT-OBS') LIMIT 1), "
+        "(SELECT k.value FROM frame_keywords k WHERE k.frame_id=f.id AND k.keyword IN "
+        "('OBSGEO-L','SITELONG','LONG-OBS') ORDER BY FIELD(k.keyword,'OBSGEO-L','SITELONG','LONG-OBS') LIMIT 1) "
+        "FROM frames f");
+    std::vector<FrameLoc> out;
+    for (const auto& r : rows) {
+        if (!r[0] || !r[1] || !r[2]) continue;
+        try {
+            const double la = std::stod(*r[1]), lo = std::stod(*r[2]);
+            if (la < -90 || la > 90 || lo < -180 || lo > 180) continue;
+            out.push_back({std::stoll(*r[0]), la, lo});
+        } catch (const std::exception&) { /* unparseable card */ }
+    }
+    return out;
+}
+
+// Great-circle distance in metres.
+double haversine_m(double la1, double lo1, double la2, double lo2) {
+    const double R = 6371000.0, d2r = M_PI / 180.0;
+    const double dla = (la2 - la1) * d2r, dlo = (lo2 - lo1) * d2r;
+    const double a = std::sin(dla / 2) * std::sin(dla / 2) +
+                     std::cos(la1 * d2r) * std::cos(la2 * d2r) * std::sin(dlo / 2) * std::sin(dlo / 2);
+    return R * 2 * std::asin(std::min(1.0, std::sqrt(a)));
+}
+
 // Clamp a query-string integer to a range, with a default.
 long qint(const httplib::Request& req, const char* key, long def, long lo, long hi) {
     if (!req.has_param(key)) return def;
@@ -1431,9 +1463,12 @@ void HttpServer::Impl::routes() {
             auto trows = d.query("SELECT id, name FROM telescopes ORDER BY name");
             auto rrows = d.query(
                 "SELECT r.id, r.name, r.camera_id, c.model, t.name, r.focal_min_mm, r.focal_max_mm, "
-                "(SELECT COUNT(*) FROM frames f WHERE f.rig_id = r.id) FROM rigs r "
+                "(SELECT COUNT(*) FROM frames f WHERE f.rig_id = r.id), r.site_id, s.name FROM rigs r "
                 "JOIN cameras c ON c.id = r.camera_id LEFT JOIN telescopes t ON t.id = r.telescope_id "
-                "ORDER BY r.name");
+                "LEFT JOIN sites s ON s.id = r.site_id ORDER BY r.name");
+            auto siterows = d.query(
+                "SELECT s.id, s.name, s.latitude, s.longitude, s.elevation_m, s.timezone, "
+                "(SELECT COUNT(*) FROM frames f WHERE f.site_id = s.id) FROM sites s ORDER BY s.name");
             // Existing rig ranges, to skip already-covered clusters.
             struct Range { long long cam; double lo, hi; };
             std::vector<Range> covered;
@@ -1474,7 +1509,9 @@ void HttpServer::Impl::routes() {
                 {"cameras", rows_to_json(camrows, {"id", "model", "frames"})},
                 {"telescopes", rows_to_json(trows, {"id", "name"})},
                 {"rigs", rows_to_json(rrows, {"id", "name", "camera_id", "camera", "telescope",
-                                              "focal_min_mm", "focal_max_mm", "frames"})},
+                                              "focal_min_mm", "focal_max_mm", "frames", "site_id", "site"})},
+                {"sites", rows_to_json(siterows, {"id", "name", "latitude", "longitude",
+                                                  "elevation_m", "timezone", "frames"})},
                 {"suggestions", suggestions}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
@@ -1496,13 +1533,18 @@ void HttpServer::Impl::routes() {
                 auto tr = d.query("SELECT id FROM telescopes WHERE name = '" + d.escape(tn) + "'");
                 if (!tr.empty() && tr[0][0]) tel = *tr[0][0];
             }
+            const long long site = body.value("site_id", 0LL);
+            const std::string site_sql = site > 0 ? std::to_string(site) : "NULL";
             long long rig_id;
             try {
-                rig_id = d.exec("INSERT INTO rigs (name, camera_id, telescope_id, focal_min_mm, focal_max_mm) "
+                rig_id = d.exec("INSERT INTO rigs (name, camera_id, telescope_id, site_id, focal_min_mm, focal_max_mm) "
                                 "VALUES ('" + d.escape(name) + "', " + std::to_string(cam) + ", " + tel + ", " +
-                                std::to_string(fmin) + ", " + std::to_string(fmax) + ")");
+                                site_sql + ", " + std::to_string(fmin) + ", " + std::to_string(fmax) + ")");
             } catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
-            d.exec("UPDATE frames SET rig_id = " + std::to_string(rig_id) + " WHERE camera_id = " +
+            // Back-fill rig_id (and site_id when the rig carries a site, so the
+            // rig's frames get the location too).
+            d.exec("UPDATE frames SET rig_id = " + std::to_string(rig_id) +
+                   (site > 0 ? ", site_id = " + std::to_string(site) : "") + " WHERE camera_id = " +
                    std::to_string(cam) + " AND focal_len_mm BETWEEN " + std::to_string(fmin) +
                    " AND " + std::to_string(fmax));
             send_json(res, json{{"id", rig_id}, {"name", name}, {"assigned", d.affected_rows()}}, 201);
@@ -1550,6 +1592,93 @@ void HttpServer::Impl::routes() {
             d.exec("UPDATE frames SET rig_id = NULL WHERE rig_id = " + id);
             const long long freed = d.affected_rows();
             d.exec("DELETE FROM rigs WHERE id = " + id);  // FK also sets frames.rig_id NULL
+            send_json(res, json{{"deleted", std::stoi(id)}, {"freed", freed}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Site builder: cluster frames by observatory location ---------------
+    // Reads each frame's location from its header cards, clusters points within
+    // `distance` metres, and skips clusters already covered by a site.
+    server->Get("/api/v1/equipment/site-suggestions", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const double dist = static_cast<double>(qint(req, "distance", 250, 1, 1000000));
+            auto locs = frame_locations(d);
+            // Greedy cluster: a point joins the first cluster within `dist` of its
+            // centroid, else starts a new one (centroid = frame-weighted mean).
+            struct Cluster { double lat, lon; long long n; };
+            std::vector<Cluster> clusters;
+            for (const auto& p : locs) {
+                bool placed = false;
+                for (auto& c : clusters) {
+                    if (haversine_m(c.lat, c.lon, p.lat, p.lon) <= dist) {
+                        c.lat = (c.lat * c.n + p.lat) / (c.n + 1);
+                        c.lon = (c.lon * c.n + p.lon) / (c.n + 1);
+                        c.n += 1; placed = true; break;
+                    }
+                }
+                if (!placed) clusters.push_back({p.lat, p.lon, 1});
+            }
+            auto sites = d.query("SELECT id, name, latitude, longitude FROM sites WHERE latitude IS NOT NULL");
+            json out = json::array();
+            for (const auto& c : clusters) {
+                json o = {{"latitude", c.lat}, {"longitude", c.lon}, {"frames", c.n}};
+                std::string covered;
+                for (const auto& s : sites)
+                    if (s[2] && s[3] && haversine_m(std::stod(*s[2]), std::stod(*s[3]), c.lat, c.lon) <= dist) {
+                        covered = s[1] ? *s[1] : ""; break;
+                    }
+                if (!covered.empty()) o["covered_by"] = covered;
+                out.push_back(std::move(o));
+            }
+            send_json(res, json{{"distance_m", dist}, {"clusters", out}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Post("/api/v1/equipment/sites", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            const std::string name = body.value("name", "");
+            if (name.empty() || !body.contains("latitude") || !body.contains("longitude")) {
+                send_error(res, 400, "name, latitude and longitude are required"); return;
+            }
+            const double lat = body["latitude"].get<double>(), lon = body["longitude"].get<double>();
+            const double dist = body.value("distance_m", 250.0);
+            auto d = db();
+            std::string cols = "name, latitude, longitude", vals = "'" + d.escape(name) + "', " +
+                std::to_string(lat) + ", " + std::to_string(lon);
+            if (body.contains("elevation_m")) { cols += ", elevation_m"; vals += ", " + std::to_string(body["elevation_m"].get<double>()); }
+            if (body.contains("timezone") && body["timezone"].is_string() && !body["timezone"].get<std::string>().empty()) {
+                cols += ", timezone"; vals += ", '" + d.escape(body["timezone"].get<std::string>()) + "'";
+            }
+            long long site_id;
+            try { site_id = d.exec("INSERT INTO sites (" + cols + ") VALUES (" + vals + ")"); }
+            catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
+            // Assign every frame within `dist` of the new site.
+            std::vector<long long> ids;
+            for (const auto& p : frame_locations(d))
+                if (haversine_m(lat, lon, p.lat, p.lon) <= dist) ids.push_back(p.id);
+            long long assigned = 0;
+            for (size_t i = 0; i < ids.size(); i += 1000) {
+                std::string list;
+                for (size_t j = i; j < ids.size() && j < i + 1000; ++j) list += (list.empty() ? "" : ",") + std::to_string(ids[j]);
+                if (!list.empty()) { d.exec("UPDATE frames SET site_id = " + std::to_string(site_id) + " WHERE id IN (" + list + ")"); assigned += d.affected_rows(); }
+            }
+            send_json(res, json{{"id", site_id}, {"name", name}, {"assigned", assigned}}, 201);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/equipment/sites/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const std::string id = std::string(req.matches[1]);
+            d.exec("UPDATE frames SET site_id = NULL WHERE site_id = " + id);
+            const long long freed = d.affected_rows();
+            d.exec("DELETE FROM sites WHERE id = " + id);
             send_json(res, json{{"deleted", std::stoi(id)}, {"freed", freed}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
