@@ -611,9 +611,13 @@ collection over the current filter), and the query builder gained membership
 conditions (`tagged` / `untagged` / `in_collection`) that compile to correlated
 `EXISTS` predicates over `frame_tags` / `collection_frames` and compose with
 everything else, so "tagged review and not in NGC7000 project" is one query. A
-frame's tags and collections show as chips in its detail drawer. Still unbuilt:
-Users (token-only today; PBKDF2 users from NightWatcher2 not ported) and a
-Database tab.
+frame's tags and collections show as chips in its detail drawer. The
+**Database** tab reports schema version, server, the view list, per-table row
+counts and on-disk sizes (`GET /api/v1/db`), and files-by-status (with a jump to
+browse errored files), plus two safe maintenance actions: re-seed the header
+mapping (`POST /api/v1/db/seed`, idempotent) and rescan all roots. The only
+§11 tab still unbuilt is **Users** (token-only today; PBKDF2 users from
+NightWatcher2 not ported).
 
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:

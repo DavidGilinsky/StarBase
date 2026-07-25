@@ -209,7 +209,7 @@ function presetToConds(p) {
   const conds = [];
   if (p.__tag) conds.push({ field: 'tag', op: 'tagged', value: p.__tag });
   if (p.__collection) conds.push({ field: 'collection', op: 'in_collection', value: p.__collection });
-  const m = { object: 'object', image_type: 'image_type', filter: 'filter', night: 'session_night', rig: 'rig' };
+  const m = { object: 'object', image_type: 'image_type', filter: 'filter', night: 'session_night', rig: 'rig', file_status: 'file_status' };
   for (const [k, field] of Object.entries(m))
     if (p[k]) conds.push({ field, op: field === 'object' || field === 'filter' || field === 'rig' ? 'like' : 'eq', value: p[k] });
   return conds;
@@ -849,6 +849,57 @@ async function tags() {
   } catch (e) { showError(e); }
 }
 
+// ---- Database --------------------------------------------------------------
+
+async function database() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const j = await api('/db');
+
+    const info = el('div', { class: 'card' }, el('h3', {}, 'Database'),
+      el('div', { class: 'kv' },
+        el('div', { class: 'k' }, 'Name'), el('div', { class: 'v' }, fmt(j.database)),
+        el('div', { class: 'k' }, 'Schema version'), el('div', { class: 'v' }, fmt(j.schema_version)),
+        el('div', { class: 'k' }, 'Server'), el('div', { class: 'v' }, fmt(j.server)),
+        el('div', { class: 'k' }, 'Views'), el('div', { class: 'v' }, (j.views || []).join(', ')),
+        el('div', { class: 'k' }, 'Total rows'), el('div', { class: 'v' }, Number(j.total_rows).toLocaleString())));
+
+    const err = (j.file_status || []).find(f => f.status === 'error');
+    const statusCard = el('div', { class: 'card' }, el('h3', {}, 'Files by status'),
+      el('div', { class: 'row', style: 'gap:.8rem' }, ...(j.file_status || []).map(f =>
+        el('span', { class: 'stat ' + (f.status === 'error' ? 'failed' : f.status === 'ok' ? 'ok' : 'skipped') },
+          `${f.status}: ${Number(f.count).toLocaleString()}`))),
+      err ? el('button', { class: 'link', style: 'margin-top:.5rem', onclick: () => go('query', { file_status: 'error' }) }, 'browse errored files →') : null);
+
+    const rowsSorted = [...j.tables].sort((a, b) => b.rows - a.rows);
+    const tbl = el('table', {},
+      el('thead', {}, el('tr', {}, el('th', {}, 'Table'), el('th', { class: 'num' }, 'Rows'),
+        el('th', { class: 'num' }, 'Data MB'), el('th', { class: 'num' }, 'Index MB'))),
+      el('tbody', {}, ...rowsSorted.map(t => el('tr', {},
+        el('td', { class: 'mono' }, t.name), el('td', { class: 'num' }, Number(t.rows).toLocaleString()),
+        el('td', { class: 'num' }, num(t.data_mb, 2)), el('td', { class: 'num' }, num(t.index_mb, 2))))));
+    const tablesCard = el('div', { class: 'card' }, el('h3', {}, `Tables (${j.tables.length})`),
+      el('div', { class: 'wrap' }, tbl));
+
+    const mstatus = el('span', {});
+    const maint = el('div', { class: 'card' }, el('h3', {}, 'Maintenance'),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', onclick: async () => {
+          mstatus.replaceChildren(el('span', { class: 'muted' }, 're-seeding…'));
+          try { const r = await apiPost('/db/seed', {}); mstatus.replaceChildren(el('span', { class: 'ok-msg' }, `re-seeded header mapping (${r.statements} statements)`)); }
+          catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+        } }, 'Re-seed header mapping'),
+        el('button', { class: 'btn', onclick: async () => {
+          mstatus.replaceChildren(el('span', { class: 'muted' }, 'scanning all roots…'));
+          try { const r = await apiPost('/scan', {}); mstatus.replaceChildren(el('span', { class: 'ok-msg' }, r.map(x => `${x.root}: ${x.frames} frames`).join(' · ') || 'nothing to scan')); database(); }
+          catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+        } }, 'Rescan all roots'), mstatus),
+      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Rescanning re-indexes every enabled root.'));
+
+    app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, tablesCard, maint);
+  } catch (e) { showError(e); }
+}
+
 // ---- shell / router --------------------------------------------------------
 
 function setConn(t) { const c = document.getElementById('conn'); c.textContent = t; c.classList.remove('err'); }
@@ -857,7 +908,7 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots, tags };
+const VIEWS = { dashboard, browse, query, jobs, roots, tags, database };
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';

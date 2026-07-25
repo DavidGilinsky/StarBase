@@ -880,6 +880,58 @@ void HttpServer::Impl::routes() {
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
+    // ---- GET /api/v1/db  (schema/status: version, tables, sizes) ----
+    server->Get("/api/v1/db", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            json j;
+            j["schema_version"] = d.schema_version();
+            j["server"] = d.server_version();
+            j["database"] = cfg.db.database;
+            // Table list with on-disk sizes; exact row counts per table (the
+            // schema is small, so COUNT(*) is cheap and avoids the InnoDB
+            // TABLE_ROWS estimate being wildly off).
+            auto meta = d.query(
+                "SELECT table_name, ROUND(data_length/1048576,3), ROUND(index_length/1048576,3) "
+                "FROM information_schema.tables WHERE table_schema = DATABASE() "
+                "AND table_type = 'BASE TABLE' ORDER BY table_name");
+            json tables = json::array();
+            long long total = 0;
+            for (const auto& r : meta) {
+                const std::string name = r[0] ? *r[0] : "";
+                long long rows = 0;
+                try {
+                    auto cr = d.query("SELECT COUNT(*) FROM `" + name + "`");
+                    if (!cr.empty() && cr[0][0]) rows = std::stoll(*cr[0][0]);
+                } catch (const std::exception&) { /* skip an unreadable table */ }
+                total += rows;
+                tables.push_back({{"name", name}, {"rows", rows},
+                                  {"data_mb", cell(r, 1)}, {"index_mb", cell(r, 2)}});
+            }
+            j["tables"] = tables;
+            j["total_rows"] = total;
+            auto fs = d.query("SELECT status, COUNT(*) FROM files GROUP BY status ORDER BY status");
+            j["file_status"] = rows_to_json(fs, {"status", "count"});
+            auto views = d.query("SELECT table_name FROM information_schema.views "
+                                 "WHERE table_schema = DATABASE() ORDER BY table_name");
+            json vs = json::array();
+            for (const auto& r : views) vs.push_back(cell(r, 0));
+            j["views"] = vs;
+            send_json(res, j);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- POST /api/v1/db/seed  (re-apply the header mapping seed; idempotent) ----
+    server->Post("/api/v1/db/seed", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            if (cfg.seed_file.empty()) { send_error(res, 400, "no seed file is configured"); return; }
+            auto d = db();
+            const int n = d.apply_script(cfg.seed_file);
+            send_json(res, json{{"seeded", cfg.seed_file}, {"statements", n}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     // ---- static web UI at / ----
     if (!cfg.web_root.empty()) {
         server->set_mount_point("/", cfg.web_root);
