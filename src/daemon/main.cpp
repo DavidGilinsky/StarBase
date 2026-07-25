@@ -134,6 +134,9 @@ int main(int argc, char** argv) {
         api.tls_key = cfg.api_tls_key;
         api.schema_file = cfg.schema_file;
         api.seed_file = cfg.seed_file;
+        api.staging_root = cfg.staging_root;
+        api.trash_root = cfg.trash_root;
+        api.link_mode = cfg.link_mode;
         api.db.host = cfg.db_host;
         api.db.port = static_cast<uint16_t>(cfg.db_port);
         api.db.user = cfg.db_user;

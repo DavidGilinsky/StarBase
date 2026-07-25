@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "action.hpp"
 #include "calibration.hpp"
 #include "logging.hpp"
 #include "mapping_loader.hpp"
@@ -341,6 +342,108 @@ void HttpServer::Impl::routes() {
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
         }
+    });
+
+    // ---- POST /api/v1/actions  (stage / fsop / export; token-gated) ----
+    // Body: {"op":"stage|copy|symlink|move|trash|export",
+    //        "frames":[ids] | "filter":<ast>, "target":"dir", "format":"...",
+    //        "dry_run":true, "link_mode":"symlink|hardlink|copy"}
+    server->Post("/api/v1/actions", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            const std::string op = body.value("op", "");
+
+            // Resolve the target set from explicit ids or a filter.
+            std::vector<starbase::action::FrameRef> frames;
+            if (body.contains("frames") && body["frames"].is_array()) {
+                std::vector<long long> ids;
+                for (const auto& v : body["frames"]) ids.push_back(v.get<long long>());
+                frames = starbase::action::resolve_by_ids(d, ids);
+            } else if (body.contains("filter")) {
+                const long limit = body.value("limit", 100000L);
+                try { frames = starbase::action::resolve_by_filter(d, body["filter"].dump(), limit); }
+                catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            }
+            if (frames.empty()) { send_error(res, 400, "no frames resolved (give 'frames' or 'filter')"); return; }
+
+            starbase::action::ActionConfig ac;
+            ac.staging_root = cfg.staging_root;
+            ac.trash_root = cfg.trash_root;
+            ac.link_mode = body.value("link_mode", cfg.link_mode);
+
+            auto job_json = [](const starbase::action::JobResult& jr) {
+                json j;
+                j["job_id"] = jr.job_id;
+                j["type"] = jr.type;
+                j["dry_run"] = jr.dry_run;
+                j["total"] = jr.total;
+                j["done"] = jr.done;
+                j["failed"] = jr.failed;
+                j["root"] = jr.root;
+                json items = json::array();
+                for (const auto& it : jr.items)
+                    items.push_back({{"frame_id", it.frame_id}, {"action", it.action},
+                                     {"src", it.src}, {"dst", it.dst},
+                                     {"status", it.status}, {"detail", it.detail}});
+                j["items"] = items;
+                return j;
+            };
+
+            if (op == "stage") {
+                send_json(res, job_json(starbase::action::stage(d, ac, frames)));
+            } else if (op == "export") {
+                const std::string fmt = body.value("format", "csv");
+                const std::string content = starbase::action::export_frames(d, frames, fmt);
+                res.set_content(content, fmt == "json" ? "application/json"
+                                        : fmt == "paths" ? "text/plain" : "text/csv");
+            } else if (op == "copy" || op == "symlink" || op == "move" || op == "trash") {
+                // Destructive ops default to a dry run unless dry_run:false is explicit.
+                const bool destructive = (op == "move" || op == "trash");
+                const bool dry = body.value("dry_run", destructive);
+                const std::string target = body.value("target", "");
+                if ((op == "copy" || op == "symlink" || op == "move") && target.empty()) {
+                    send_error(res, 400, "'" + op + "' needs a target directory"); return;
+                }
+                send_json(res, job_json(starbase::action::fsop(d, ac, op, frames, target, dry)));
+            } else {
+                send_error(res, 400, "unknown op '" + op + "'");
+            }
+        } catch (const json::exception& e) {
+            send_error(res, 400, std::string("invalid JSON: ") + e.what());
+        } catch (const std::exception& e) {
+            send_error(res, 500, e.what());
+        }
+    });
+
+    // ---- GET /api/v1/jobs and /api/v1/jobs/:id  (audit trail) ----
+    server->Get("/api/v1/jobs", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query(
+                "SELECT id, type, status, dry_run, total_items, done_items, failed_items, "
+                "DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%sZ') FROM jobs ORDER BY id DESC LIMIT 100");
+            send_json(res, rows_to_json(rows, {"id", "type", "status", "dry_run", "total",
+                                               "done", "failed", "created_at"}));
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+    server->Get(R"(/api/v1/jobs/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto d = db();
+            const std::string id = d.escape(req.matches[1]);
+            auto jr = d.query("SELECT id, type, status, dry_run, total_items, done_items, "
+                              "failed_items FROM jobs WHERE id = " + id);
+            if (jr.empty()) { send_error(res, 404, "no such job"); return; }
+            json j;
+            const std::vector<std::string> jc = {"id", "type", "status", "dry_run",
+                                                 "total", "done", "failed"};
+            for (size_t i = 0; i < jc.size(); ++i) j[jc[i]] = cell(jr[0], i);
+            auto items = d.query("SELECT frame_id, action, src_path, dst_path, status, detail "
+                                 "FROM job_items WHERE job_id = " + id + " ORDER BY id LIMIT 5000");
+            j["items"] = rows_to_json(items, {"frame_id", "action", "src", "dst", "status", "detail"});
+            send_json(res, j);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- GET /api/v1/summary  (dashboard aggregates) ----

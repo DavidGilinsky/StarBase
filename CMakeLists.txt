@@ -140,10 +140,15 @@ if(SB_WITH_DB)
         target_include_directories(sb_match PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/match)
         target_link_libraries(sb_match PUBLIC sb_db sb_httplib)
 
+        # Action engine: staging trees, filesystem ops (dry-run + trash), exports.
+        add_library(sb_action STATIC src/action/action.cpp)
+        target_include_directories(sb_action PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/action)
+        target_link_libraries(sb_action PUBLIC sb_query)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -237,6 +242,10 @@ if(SB_BUILD_TESTS)
             add_executable(match_test tests/match_test.cpp)
             target_link_libraries(match_test PRIVATE sb_match)
             add_test(NAME match_test COMMAND match_test)
+
+            add_executable(action_test tests/action_test.cpp)
+            target_link_libraries(action_test PRIVATE sb_action)
+            add_test(NAME action_test COMMAND action_test)
         endif()
     endif()
 endif()

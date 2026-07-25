@@ -35,6 +35,10 @@ struct ApiConfig {
     db::DbConfig db;             // handlers open their own connection from this
     std::string schema_file;     // for POST /api/v1/db/init (optional)
     std::string seed_file;
+    // Action engine paths (staging trees, trash, default link mode).
+    std::string staging_root;
+    std::string trash_root;
+    std::string link_mode = "symlink";
 };
 
 // Runs a cpp-httplib server on a background thread. Each request handler opens
