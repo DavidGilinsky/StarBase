@@ -77,6 +77,12 @@ struct ResolvedFrame {
     std::optional<double> ccd_temp_c;
     std::optional<double> set_temp_c;
     std::optional<double> airmass;
+    // Sky brightness, when the header carries it (e.g. stamped by
+    // nightwatcher-ingest). sqm_mag_arcsec2 is the queryable value.
+    std::optional<double>      sqm_mag_arcsec2;
+    std::optional<std::string> sqm_sensor;
+    std::optional<std::string> sqm_time_utc;
+    std::optional<int>         sqm_dt_s;
     std::optional<std::string> pier_side;   // east | west
     std::optional<std::string> row_order;   // top-down | bottom-up
 

@@ -165,6 +165,10 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
             fr.real("ccd_temp_c", rf.ccd_temp_c);
             fr.real("set_temp_c", rf.set_temp_c);
             fr.real("airmass", rf.airmass);
+            fr.real("sqm_mag_arcsec2", rf.sqm_mag_arcsec2);
+            fr.str("sqm_sensor", rf.sqm_sensor);
+            fr.str("sqm_time_utc", rf.sqm_time_utc);
+            fr.inum("sqm_dt_s", rf.sqm_dt_s);
             fr.str("pier_side", rf.pier_side);
             fr.str("row_order", rf.row_order);
             // A frame with no DATE-OBS or an unrecognized type is flagged so the

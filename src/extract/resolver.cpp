@@ -242,6 +242,16 @@ ResolvedFrame resolve(const fits::Hdu& hdu, const HeaderMapping& mapping,
     if (auto raw = resolve_raw(hdu, mapping, "ccd_temp_c")) f.ccd_temp_c = to_double(*raw);
     if (auto raw = resolve_raw(hdu, mapping, "airmass"))    f.airmass = to_double(*raw);
 
+    // Sky brightness (SQM), when the header carries it. Only the value is
+    // required; the sensor id, reading time, and offset are recorded when present.
+    if (auto raw = resolve_raw(hdu, mapping, "sqm"))        f.sqm_mag_arcsec2 = to_double(*raw);
+    if (auto raw = resolve_raw(hdu, mapping, "sqm_sensor")) f.sqm_sensor = *raw;
+    if (auto raw = resolve_raw(hdu, mapping, "sqm_time")) {
+        const std::string t = normalize_date_obs(*raw);
+        if (!t.empty()) f.sqm_time_utc = t;
+    }
+    if (auto raw = resolve_raw(hdu, mapping, "sqm_dt_s"))   f.sqm_dt_s = to_int_round(*raw);
+
     // Geometry is authoritative from the image itself, not a header card.
     if (hdu.naxis1 > 0) f.naxis1 = static_cast<int>(hdu.naxis1);
     if (hdu.naxis2 > 0) f.naxis2 = static_cast<int>(hdu.naxis2);

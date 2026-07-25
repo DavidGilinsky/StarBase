@@ -40,6 +40,10 @@ HeaderMapping HeaderMapping::defaults() {
         {"dec",          {"DEC", "OBJCTDEC"}},
         {"filter",       {"FILTER"}},
         {"airmass",      {"AIRMASS"}},
+        {"sqm",          {"SQM"}},
+        {"sqm_sensor",   {"SQMSRC"}},
+        {"sqm_time",     {"SQMTIME"}},
+        {"sqm_dt_s",     {"SQMDT"}},
         {"pier_side",    {"PIERSIDE"}},
         {"row_order",    {"ROWORDER"}},
     };

@@ -50,6 +50,7 @@ void test_nina_light() {
         {"FILTER", "CLEAR"}, {"EXPTIME", "300.0"}, {"GAIN", "100"}, {"OFFSET", "9"},
         {"XBINNING", "1"}, {"YBINNING", "1"}, {"SET-TEMP", "0.0"}, {"CCD-TEMP", "0.1"},
         {"FOCALLEN", "1295.0"}, {"PIERSIDE", "East"}, {"ROWORDER", "TOP-DOWN"},
+        {"SQM", "21.35"}, {"SQMSRC", "DSN036"}, {"SQMDT", "30"},
     });
     auto f = ex::resolve(h, m, site);
 
@@ -58,6 +59,9 @@ void test_nina_light() {
     check(f.ra_deg && near(*f.ra_deg, 311.404464398845), "RA decimal degrees");
     check(f.dec_deg && near(*f.dec_deg, 30.7237002099616), "DEC decimal degrees");
     check(f.exposure_s && near(*f.exposure_s, 300.0), "exposure");
+    check(f.sqm_mag_arcsec2 && near(*f.sqm_mag_arcsec2, 21.35), "SQM extracted from the header");
+    check(f.sqm_sensor.value_or("") == "DSN036", "SQM sensor");
+    check(f.sqm_dt_s && *f.sqm_dt_s == 30, "SQM dt seconds");
     check(f.gain.value_or(-1) == 100, "gain");
     check(f.offset_adu.value_or(-1) == 9, "offset");
     check(f.binx.value_or(-1) == 1 && f.biny.value_or(-1) == 1, "binning");
