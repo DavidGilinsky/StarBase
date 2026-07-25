@@ -181,6 +181,9 @@ struct HttpServer::Impl {
         return false;
     }
 
+    // Apply schema.sql on startup (idempotent) so a fresh database is built and
+    // tables added since the last version appear without a manual migration.
+    void ensure_schema();
     // Seed an initial admin so a fresh install can be logged into. Idempotent.
     void ensure_default_admin();
 
@@ -1386,6 +1389,22 @@ void HttpServer::Impl::routes() {
     }
 }
 
+void HttpServer::Impl::ensure_schema() {
+    if (cfg.schema_file.empty()) return;
+    try {
+        auto d = db();
+        const bool fresh = (d.schema_version() == 0);
+        // schema.sql is entirely CREATE ... IF NOT EXISTS / CREATE OR REPLACE
+        // VIEW, so applying it every start builds a fresh database and adds any
+        // tables introduced since the last release (the migration path).
+        d.apply_script(cfg.schema_file);
+        if (fresh) starbase::log_info("initialized the StarBase database schema");
+    } catch (const std::exception& e) {
+        starbase::log_warn(std::string("could not ensure the database schema (") + e.what() +
+                           "); run 'starbasectl db-init' if this is a fresh install");
+    }
+}
+
 void HttpServer::Impl::ensure_default_admin() {
     try {
         auto d = db();
@@ -1431,6 +1450,7 @@ void HttpServer::start() {
     }
 
     impl_->routes();
+    impl_->ensure_schema();
     impl_->ensure_default_admin();
     if (!impl_->server->bind_to_port(bind.c_str(), port))
         throw std::runtime_error("cannot bind API to " + bind + ":" + std::to_string(port) +
