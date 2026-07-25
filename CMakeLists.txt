@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(StarBase
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "A queryable interface to astronomical image files"
     HOMEPAGE_URL "https://github.com/DavidGilinsky/StarBase"
     LANGUAGES C CXX)
