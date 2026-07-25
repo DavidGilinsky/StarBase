@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Author:        David Gilinsky
+# File:          config/systemd/starbased.service.in
+# Purpose:       systemd service unit for starbased. `@CMAKE_INSTALL_PREFIX@` is
+#                substituted at build time; the .deb symlinks the generated unit
+#                into /etc/systemd/system.
+# Created:       2026-07-25
+# Last Modified: 2026-07-25
+# Version:       0.1.0
+# License:       GPL-3.0-or-later
+# ---------------------------------------------------------------------------
+[Unit]
+Description=StarBase astronomical image index daemon
+Documentation=https://github.com/DavidGilinsky/StarBase
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=starbase
+Group=starbase
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/starbased --config /etc/starbase/starbase.conf
+Restart=on-failure
+RestartSec=5
+
+# The database password lives here, mode 0600, never in git:
+#   /etc/starbase/starbase.env  ->  SB_DB_PASSWORD=...
+# Optionally SB_API_TOKEN=... for script/PJSR access without a login.
+EnvironmentFile=-/etc/starbase/starbase.env
+
+# Runtime hardening. ProtectSystem=full (not strict) because a filesystem action
+# on a *writable* root writes into the archive, which lives outside the prefix;
+# full keeps /usr, /boot, and /etc read-only while leaving data trees writable.
+# Tighten to strict + explicit ReadWritePaths if all your roots are read-only.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+# Service-owned, persistent state (/var/lib/starbase): the self-signed TLS cert,
+# and the staging/trash trees the action engine builds.
+StateDirectory=starbase
+StateDirectoryMode=0750
+
+# The daemon reads image roots outside the prefix. Give the 'starbase' user read
+# access by adding it to the group that owns your archive, e.g.:
+#   sudo usermod -aG astro starbase
+# (a matching group must exist on the NFS/SMB export for a network archive).
+
+[Install]
+WantedBy=multi-user.target

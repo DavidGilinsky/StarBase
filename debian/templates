@@ -1,0 +1,60 @@
+Template: starbase/db_password
+Type: password
+Description: StarBase database password:
+ The daemon connects to its MariaDB/MySQL database as the 'starbase' user. This
+ password is written to /etc/starbase/starbase.env (mode 0600, read by the
+ service) and is never stored in the package or in git.
+ .
+ Leave blank to set the database up yourself later, then re-run:
+ dpkg-reconfigure starbase
+
+Template: starbase/db_host
+Type: string
+Default: 127.0.0.1
+Description: Database host:
+ Host of the MariaDB/MySQL server, optionally with a ":port" suffix. Use
+ 127.0.0.1 for a server on this machine, or a hostname/IP for a remote one.
+ StarBase uses its own 'starbase' database and shares no tables with
+ NightWatcher2, though it can share the same MariaDB instance.
+
+Template: starbase/db_create
+Type: boolean
+Default: true
+Description: Create the 'starbase' database and user now?
+ When the database is local and this machine's administrator can reach
+ MariaDB/MySQL over its root socket, the database and application user are
+ created automatically with the password above. The daemon builds the tables and
+ seeds an admin login on first start. Choose no to run the shipped
+ sql/setup.sql yourself.
+
+Template: starbase/api_bind
+Type: string
+Default: 127.0.0.1
+Description: Web UI / API bind address:
+ Address the built-in HTTP server listens on. 127.0.0.1 serves only this
+ machine; 0.0.0.0 serves the whole network. You can also change this later from
+ the web UI's Server tab.
+
+Template: starbase/api_port
+Type: string
+Default: 8642
+Description: Web UI / API port:
+
+Template: starbase/api_tls
+Type: boolean
+Default: true
+Description: Serve the web UI / API over HTTPS?
+ When enabled and no certificate exists yet, a self-signed certificate is
+ generated automatically (browsers show a one-time warning you can accept).
+ Recommended, and especially when binding off localhost.
+
+Template: starbase/start_now
+Type: boolean
+Default: true
+Description: Start the StarBase service now?
+ Safe once the database is reachable. If you let this installer create the
+ database above, it is fine to start now; otherwise start it later with:
+ systemctl start starbased
+ .
+ On first start the daemon builds its tables and seeds an 'admin' / 'admin'
+ login that you must change immediately from the web UI.

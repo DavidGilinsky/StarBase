@@ -1,0 +1,24 @@
+#!/bin/sh
+# StarBase post-removal: drop the symlinks created in postinst; on purge also
+# remove /etc/starbase (config + secrets) and the service user. The 'starbase'
+# database is never dropped automatically.
+set -e
+SYMLINK_BINDIR="@SB_SYMLINK_BINDIR@"
+case "$1" in
+  remove|purge)
+    rm -f "$SYMLINK_BINDIR/starbasectl"
+    rm -f /etc/systemd/system/starbased.service
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+    ;;
+esac
+if [ "$1" = purge ]; then
+  rm -rf /etc/starbase
+  deluser --system starbase >/dev/null 2>&1 || userdel starbase >/dev/null 2>&1 || true
+  echo "starbase: /etc/starbase removed. The 'starbase' database was left intact;"
+  echo "starbase: drop it yourself with: sudo mariadb -e \"DROP DATABASE starbase\""
+  if [ -f /usr/share/debconf/confmodule ]; then
+    . /usr/share/debconf/confmodule
+    db_purge
+  fi
+fi
+exit 0

@@ -293,17 +293,69 @@ if(SB_BUILD_TESTS)
     endif()
 endif()
 
-# ---- Install ----
+# ---- Install (self-contained bundle under CMAKE_INSTALL_PREFIX) ----
+# Layout, flattened directly under the prefix:
+#   <prefix>/bin  <prefix>/web  <prefix>/sql  <prefix>/share  <prefix>/lib/systemd/system
+# The .deb's postinst reaches outside the prefix to symlink starbasectl onto
+# PATH, link the systemd unit, seed /etc/starbase, and create the service user.
+set(SB_SYMLINK_BINDIR "/usr/local/bin" CACHE PATH
+    "Directory to symlink starbasectl into so it lands on PATH")
+
+# Bake the real prefix into the systemd unit.
+configure_file(config/systemd/starbased.service.in
+               ${CMAKE_CURRENT_BINARY_DIR}/starbased.service @ONLY)
+
 install(TARGETS starbased RUNTIME DESTINATION bin)
 if(SB_WITH_DB)
     install(TARGETS starbasectl RUNTIME DESTINATION bin)
 endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/starbase.conf.example
         DESTINATION share/starbase)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/starbased.service DESTINATION lib/systemd/system)
 install(FILES sql/schema.sql sql/setup.sql sql/seed.sql sql/equipment.example.sql DESTINATION sql)
 install(DIRECTORY sql/migrations DESTINATION sql OPTIONAL)
 install(DIRECTORY web/ DESTINATION web OPTIONAL)
+install(DIRECTORY pjsr/ DESTINATION share/starbase/pjsr OPTIONAL)
 install(FILES LICENSE README.md DESTINATION share/doc/starbase)
+
+# ---- Packaging (CPack: Debian .deb) ----
+# Build one with:
+#   cmake -B pkg -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build pkg --parallel
+#   ( cd pkg && cpack -G DEB )
+# The payload is the bundle under the prefix; the package's postinst creates the
+# service user, the PATH/systemd symlinks, seeds /etc/starbase, applies the
+# debconf answers, optionally creates the database, and enables the service.
+set(CPACK_PACKAGE_NAME "starbase")
+set(CPACK_PACKAGE_VENDOR "David Gilinsky")
+set(CPACK_PACKAGE_CONTACT "David Gilinsky <gilinsky@gilinskyresearch.com>")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_HOMEPAGE_URL "${PROJECT_HOMEPAGE_URL}")
+set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+set(CPACK_STRIP_FILES ON)
+
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+set(CPACK_DEBIAN_PACKAGE_SECTION "science")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)             # auto Depends from the ELF binaries
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "adduser, debconf (>= 0.5) | debconf-2.0")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "mariadb-server | mysql-server")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)  # 0755 maintainer scripts
+set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")          # starbase_<ver>_<arch>.deb
+
+# postinst/prerm/postrm carry @CMAKE_INSTALL_PREFIX@/@SB_SYMLINK_BINDIR@, so they
+# are generated from .in; config/templates are static and shipped as-is.
+configure_file(debian/postinst.in ${CMAKE_CURRENT_BINARY_DIR}/debian/postinst @ONLY)
+configure_file(debian/prerm.in    ${CMAKE_CURRENT_BINARY_DIR}/debian/prerm    @ONLY)
+configure_file(debian/postrm.in   ${CMAKE_CURRENT_BINARY_DIR}/debian/postrm   @ONLY)
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${CMAKE_CURRENT_BINARY_DIR}/debian/postinst"
+    "${CMAKE_CURRENT_BINARY_DIR}/debian/prerm"
+    "${CMAKE_CURRENT_BINARY_DIR}/debian/postrm"
+    "${CMAKE_CURRENT_SOURCE_DIR}/debian/config"
+    "${CMAKE_CURRENT_SOURCE_DIR}/debian/templates")
+
+include(CPack)
 
 message(STATUS "StarBase ${PROJECT_VERSION}")
 message(STATUS "  install prefix : ${CMAKE_INSTALL_PREFIX}")

@@ -92,3 +92,10 @@ link_mode = symlink
 # vendored (PJSR is PCL-licensed, not GPL).
 binary = /opt/PixInsight/bin/PixInsight.sh
 wbpp_script = /opt/PixInsight/src/scripts/BatchPreprocessing/WBPP.js
+
+[names]
+# Optional online target-name resolution via CDS Sesame (SIMBAD/NED/VizieR).
+# Off by default: it is the only feature that reaches the network. The offline
+# catalog canonicalizer (M101 -> "M 101") always runs and needs nothing here.
+sesame_enabled = off
+sesame_url = https://cds.unistra.fr

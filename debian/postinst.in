@@ -1,0 +1,149 @@
+#!/bin/sh
+# StarBase post-install: create the service user, PATH/systemd symlinks, /etc
+# config seed, debconf-driven database + API configuration, and systemd
+# enablement.
+set -e
+
+PREFIX="@CMAKE_INSTALL_PREFIX@"
+SYMLINK_BINDIR="@SB_SYMLINK_BINDIR@"
+CONF=/etc/starbase/starbase.conf
+ENVF=/etc/starbase/starbase.env
+
+HAVE_DEBCONF=false
+if [ -f /usr/share/debconf/confmodule ]; then
+  . /usr/share/debconf/confmodule
+  HAVE_DEBCONF=true
+fi
+
+# Set "KEY = VALUE" under [SECTION] in an INI file, section-aware: [database]
+# and [api] both have a `port` key, so a blind sed would rewrite the wrong one.
+set_ini() {  # set_ini FILE SECTION KEY VALUE
+  awk -v sec="$2" -v key="$3" -v val="$4" '
+    /^[[:space:]]*\[/ { insec = ($0 ~ ("^[[:space:]]*\\[" sec "\\]")) }
+    insec && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { print key " = " val; next }
+    { print }
+  ' "$1" > "$1.sbtmp" && mv "$1.sbtmp" "$1"
+}
+
+case "$1" in
+  configure)
+    # 1) A dedicated system user to run the service (fixed, not DynamicUser, so
+    #    it can be added to the group that owns the image archive).
+    if ! getent passwd starbase >/dev/null 2>&1; then
+      adduser --system --group --no-create-home --home /var/lib/starbase \
+              --gecos "StarBase service" starbase >/dev/null 2>&1 || \
+        useradd --system --user-group --home-dir /var/lib/starbase \
+                --shell /usr/sbin/nologin starbase >/dev/null 2>&1 || true
+    fi
+
+    # 2) CLI symlink on PATH (the daemon is started by systemd via absolute path).
+    mkdir -p "$SYMLINK_BINDIR"
+    [ -x "$PREFIX/bin/starbasectl" ] && ln -sf "$PREFIX/bin/starbasectl" "$SYMLINK_BINDIR/starbasectl"
+
+    # 3) systemd unit into its searched path.
+    ln -sf "$PREFIX/lib/systemd/system/starbased.service" /etc/systemd/system/starbased.service
+
+    # 4) Seed /etc config, never clobbering an existing one.
+    mkdir -p /etc/starbase
+    if [ ! -e "$CONF" ]; then
+      cp "$PREFIX/share/starbase/starbase.conf.example" "$CONF"
+    fi
+
+    # 5) Apply the debconf answers: DB connection + API settings into the config,
+    #    the password into the 0600 env file, and (optionally) create the DB.
+    DB_READY=false
+    START_NOW=false
+    if [ "$HAVE_DEBCONF" = true ]; then
+      db_get starbase/db_password; DB_PASS="$RET"
+      db_get starbase/db_host;     DB_HOST="$RET"
+      db_get starbase/db_create;   DB_CREATE="$RET"
+      db_get starbase/api_bind;    API_BIND="$RET"
+      db_get starbase/api_port;    API_PORT="$RET"
+      db_get starbase/api_tls;     API_TLS="$RET"
+      db_get starbase/start_now;   START_NOW="$RET"
+      db_stop
+
+      if [ -f "$CONF" ]; then
+        [ -n "$DB_HOST" ]  && set_ini "$CONF" database host "$DB_HOST"
+        [ -n "$API_BIND" ] && set_ini "$CONF" api bind "$API_BIND"
+        [ -n "$API_PORT" ] && set_ini "$CONF" api port "$API_PORT"
+        case "$API_TLS" in
+          true)  set_ini "$CONF" api tls on  ;;
+          false) set_ini "$CONF" api tls off ;;
+        esac
+      fi
+
+      # Secret -> env file (0600, read by the systemd unit as SB_DB_PASSWORD).
+      if [ -n "$DB_PASS" ]; then
+        umask 077
+        tmp=$(mktemp "${ENVF}.XXXXXX")
+        if [ -f "$ENVF" ]; then
+          grep -v '^[[:space:]]*SB_DB_PASSWORD=' "$ENVF" >> "$tmp" 2>/dev/null || true
+        fi
+        printf 'SB_DB_PASSWORD=%s\n' "$DB_PASS" >> "$tmp"
+        mv "$tmp" "$ENVF"
+        chmod 0600 "$ENVF"
+      fi
+
+      # Optionally create the database + user via the local root socket. The
+      # daemon builds the tables and seeds the admin account on first start.
+      is_local=false
+      case "$DB_HOST" in
+        ""|localhost|127.0.0.1|::1|localhost:*|127.0.0.1:*) is_local=true ;;
+      esac
+      if [ "$DB_CREATE" = true ] && [ "$is_local" = true ] && [ -n "$DB_PASS" ]; then
+        MYSQL=
+        for c in mariadb mysql; do
+          command -v "$c" >/dev/null 2>&1 && { MYSQL="$c"; break; }
+        done
+        if [ -n "$MYSQL" ] && "$MYSQL" -e 'SELECT 1' >/dev/null 2>&1; then
+          esc=$(printf '%s' "$DB_PASS" | sed "s/'/''/g")
+          if "$MYSQL" >/dev/null 2>&1 <<SQL
+CREATE DATABASE IF NOT EXISTS \`starbase\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'starbase'@'localhost' IDENTIFIED BY '$esc';
+CREATE USER IF NOT EXISTS 'starbase'@'127.0.0.1' IDENTIFIED BY '$esc';
+ALTER USER 'starbase'@'localhost' IDENTIFIED BY '$esc';
+ALTER USER 'starbase'@'127.0.0.1' IDENTIFIED BY '$esc';
+GRANT ALL PRIVILEGES ON \`starbase\`.* TO 'starbase'@'localhost';
+GRANT ALL PRIVILEGES ON \`starbase\`.* TO 'starbase'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQL
+          then
+            DB_READY=true
+            echo "starbase: database 'starbase' and user are ready."
+          else
+            echo "starbase: automatic database setup failed; run 'sudo mariadb < $PREFIX/sql/setup.sql' yourself."
+          fi
+        else
+          echo "starbase: no reachable local MariaDB/MySQL root socket; run 'sudo mariadb < $PREFIX/sql/setup.sql' yourself."
+        fi
+      elif [ "$is_local" != true ] && [ -n "$DB_PASS" ]; then
+        DB_READY=true    # remote DB: assume the operator manages it
+      elif [ -n "$DB_PASS" ]; then
+        DB_READY=true    # local, creation declined: operator takes responsibility
+      fi
+    fi
+
+    # 6) systemd: load + enable the unit; start it only when the DB looks ready.
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl enable starbased.service >/dev/null 2>&1 || true
+      if [ "${START_NOW:-false}" = true ] && [ "$DB_READY" = true ]; then
+        if systemctl restart starbased.service >/dev/null 2>&1; then
+          scheme=http; [ "${API_TLS:-true}" = true ] && scheme=https
+          echo "starbase: service started (web UI on ${scheme}://${API_BIND:-127.0.0.1}:${API_PORT:-8642})."
+          echo "starbase: log in as admin / admin and change the password immediately."
+        else
+          echo "starbase: service failed to start; check 'journalctl -u starbased'."
+        fi
+      fi
+    fi
+
+    if [ "${START_NOW:-false}" != true ] || [ "$DB_READY" != true ]; then
+      echo "starbase: give the 'starbase' user read access to your archive (e.g. 'sudo usermod -aG astro starbase'),"
+      echo "starbase: then when the database is ready -> sudo systemctl start starbased"
+    fi
+    ;;
+esac
+
+exit 0
