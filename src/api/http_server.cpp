@@ -1433,7 +1433,22 @@ void HttpServer::Impl::ensure_schema() {
         // VIEW, so applying it every start builds a fresh database and adds any
         // tables introduced since the last release (the migration path).
         d.apply_script(cfg.schema_file);
-        if (fresh) starbase::log_info("initialized the StarBase database schema");
+        if (fresh) {
+            starbase::log_info("initialized the StarBase database schema");
+            // Seed the generic config (header mappings, value aliases, default
+            // calibration rules) only on a brand-new database, so it is present
+            // out of the box without clobbering later operator edits. Equipment
+            // (rigs/sites/telescopes) is site-specific and is left to the
+            // operator. seed.sql is INSERT IGNORE, hence safe.
+            if (!cfg.seed_file.empty()) {
+                try { d.apply_script(cfg.seed_file);
+                      starbase::log_info("seeded header mappings and calibration rules"); }
+                catch (const std::exception& e) {
+                    starbase::log_warn(std::string("could not seed defaults (") + e.what() +
+                                       "); run 'starbasectl db-seed' to load them");
+                }
+            }
+        }
     } catch (const std::exception& e) {
         starbase::log_warn(std::string("could not ensure the database schema (") + e.what() +
                            "); run 'starbasectl db-init' if this is a fresh install");
