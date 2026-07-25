@@ -27,6 +27,23 @@ Description: Create the 'starbase' database and user now?
  seeds an admin login on first start. Choose no to run the shipped
  sql/setup.sql yourself.
 
+Template: starbase/archive_group
+Type: string
+Description: Group that owns your image archive (for read access):
+ The service runs as the unprivileged 'starbase' user. To let it read your FITS
+ archive, that user is added to the group that owns the files (for a network
+ archive, a matching group must exist on the NFS/SMB export). Common on an
+ observatory host is a shared group such as 'astro'. Leave blank to do this
+ yourself later with:  sudo usermod -aG <group> starbase
+
+Template: starbase/root_path
+Type: string
+Description: Directory tree to index now (optional):
+ An absolute path to a tree of FITS/XISF data to register and scan on first
+ start, e.g. /astronomy/astro-imaging/lights. The label is taken from the last
+ path component. Leave blank to add roots later from the Roots tab or with
+ 'starbasectl add-root'; more can be added at any time.
+
 Template: starbase/api_bind
 Type: string
 Default: 127.0.0.1

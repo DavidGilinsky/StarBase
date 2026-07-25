@@ -3,11 +3,13 @@
 set -e
 . /usr/share/debconf/confmodule
 
-db_input high   starbase/db_password || true
-db_input medium starbase/db_host     || true
-db_input high   starbase/db_create   || true
-db_input high   starbase/api_bind    || true
-db_input medium starbase/api_port    || true
-db_input medium starbase/api_tls     || true
-db_input medium starbase/start_now   || true
+db_input high   starbase/db_password   || true
+db_input medium starbase/db_host       || true
+db_input high   starbase/db_create     || true
+db_input high   starbase/archive_group || true
+db_input medium starbase/root_path     || true
+db_input high   starbase/api_bind      || true
+db_input medium starbase/api_port      || true
+db_input medium starbase/api_tls       || true
+db_input medium starbase/start_now     || true
 db_go || true

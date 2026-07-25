@@ -54,13 +54,15 @@ case "$1" in
     DB_READY=false
     START_NOW=false
     if [ "$HAVE_DEBCONF" = true ]; then
-      db_get starbase/db_password; DB_PASS="$RET"
-      db_get starbase/db_host;     DB_HOST="$RET"
-      db_get starbase/db_create;   DB_CREATE="$RET"
-      db_get starbase/api_bind;    API_BIND="$RET"
-      db_get starbase/api_port;    API_PORT="$RET"
-      db_get starbase/api_tls;     API_TLS="$RET"
-      db_get starbase/start_now;   START_NOW="$RET"
+      db_get starbase/db_password;   DB_PASS="$RET"
+      db_get starbase/db_host;       DB_HOST="$RET"
+      db_get starbase/db_create;     DB_CREATE="$RET"
+      db_get starbase/archive_group; ARCHIVE_GROUP="$RET"
+      db_get starbase/root_path;     ROOT_PATH="$RET"
+      db_get starbase/api_bind;      API_BIND="$RET"
+      db_get starbase/api_port;      API_PORT="$RET"
+      db_get starbase/api_tls;       API_TLS="$RET"
+      db_get starbase/start_now;     START_NOW="$RET"
       db_stop
 
       if [ -f "$CONF" ]; then
@@ -121,6 +123,41 @@ SQL
         DB_READY=true    # remote DB: assume the operator manages it
       elif [ -n "$DB_PASS" ]; then
         DB_READY=true    # local, creation declined: operator takes responsibility
+      fi
+
+      # Archive read access: the service runs as 'starbase', so add it to the
+      # group that owns the image files (takes effect when the service starts).
+      if [ -n "$ARCHIVE_GROUP" ]; then
+        if getent group "$ARCHIVE_GROUP" >/dev/null 2>&1; then
+          if usermod -aG "$ARCHIVE_GROUP" starbase 2>/dev/null; then
+            echo "starbase: added user 'starbase' to group '$ARCHIVE_GROUP' for archive access."
+          else
+            echo "starbase: could not add 'starbase' to group '$ARCHIVE_GROUP'; do it yourself with 'sudo usermod -aG $ARCHIVE_GROUP starbase'."
+          fi
+        else
+          echo "starbase: group '$ARCHIVE_GROUP' does not exist; add 'starbase' to your archive's group later with usermod."
+        fi
+      fi
+
+      # Build the schema up front (idempotent) so it exists before the daemon's
+      # first start -- this also silences the one-time "settings table does not
+      # exist" notice -- and register an initial root if one was given.
+      if [ "$DB_READY" = true ] && [ -n "$DB_PASS" ]; then
+        CTL="$PREFIX/bin/starbasectl"
+        if [ -x "$CTL" ]; then
+          SB_DB_PASSWORD="$DB_PASS" "$CTL" db-init >/dev/null 2>&1 || \
+            echo "starbase: 'starbasectl db-init' did not run; the daemon will build the schema on start."
+          if [ -n "$ROOT_PATH" ] && [ -d "$ROOT_PATH" ]; then
+            LABEL=$(basename "$ROOT_PATH")
+            if SB_DB_PASSWORD="$DB_PASS" "$CTL" add-root "$LABEL" "$ROOT_PATH" >/dev/null 2>&1; then
+              echo "starbase: registered root '$LABEL' -> $ROOT_PATH (scan it from the Roots tab)."
+            else
+              echo "starbase: could not register root '$ROOT_PATH' (already present, unreadable, or DB not reachable)."
+            fi
+          elif [ -n "$ROOT_PATH" ]; then
+            echo "starbase: '$ROOT_PATH' is not a directory; register your archive later from the Roots tab."
+          fi
+        fi
       fi
     fi
 
