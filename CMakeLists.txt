@@ -151,10 +151,15 @@ if(SB_WITH_DB)
         target_include_directories(sb_pix PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/pix)
         target_link_libraries(sb_pix PUBLIC sb_warnings)
 
+        # Authentication: PBKDF2-HMAC-SHA256 password hashing and session tokens.
+        add_library(sb_auth STATIC src/auth/password.cpp)
+        target_include_directories(sb_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/auth)
+        target_link_libraries(sb_auth PUBLIC sb_warnings OpenSSL::Crypto)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_pix sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_pix sb_auth sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -263,6 +268,11 @@ if(SB_BUILD_TESTS)
             add_executable(wbpp_test tests/wbpp_test.cpp)
             target_link_libraries(wbpp_test PRIVATE sb_pix)
             add_test(NAME wbpp_test COMMAND wbpp_test)
+
+            # Password hashing is pure: no database needed.
+            add_executable(password_test tests/password_test.cpp)
+            target_link_libraries(password_test PRIVATE sb_auth)
+            add_test(NAME password_test COMMAND password_test)
         endif()
     endif()
 endif()

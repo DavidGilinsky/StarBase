@@ -900,6 +900,62 @@ async function database() {
   } catch (e) { showError(e); }
 }
 
+// ---- Users (admin) ---------------------------------------------------------
+
+async function users() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const list = await api('/users');
+
+    const nu = el('input', { placeholder: 'username', style: 'width:10em' });
+    const np = el('input', { type: 'password', placeholder: 'password', style: 'width:12em' });
+    const nr = el('select', {}, ...['user', 'admin', 'readonly'].map(r => el('option', { value: r }, r)));
+    const cstatus = el('span', {});
+    const createCard = el('div', { class: 'card' }, el('h3', {}, 'Add a user'),
+      el('div', { class: 'row' }, nu, np, nr,
+        el('button', { class: 'btn primary', onclick: async () => {
+          if (!nu.value.trim() || !np.value) { cstatus.replaceChildren(el('span', { class: 'err-msg' }, 'username and password required')); return; }
+          try { await apiPost('/users', { username: nu.value.trim(), password: np.value, role: nr.value, must_change_password: true }); users(); }
+          catch (e) { cstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+        } }, 'Create user'), cstatus),
+      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'New users must change their password on first login. Roles: admin (full), user (writes), readonly (browse only).'));
+
+    const rows = list.map(u => {
+      const roleSel = el('select', { onchange: async (e) => {
+        try { await apiPatch('/users/' + encodeURIComponent(u.username), { role: e.target.value }); }
+        catch (err) { alert(String(err.message || err)); users(); }
+      } }, ...['admin', 'user', 'readonly'].map(r => el('option', { value: r, selected: u.role === r }, r)));
+      const enabled = el('input', { type: 'checkbox', checked: truthy(u.enabled), onchange: async (e) => {
+        try { await apiPatch('/users/' + encodeURIComponent(u.username), { enabled: e.target.checked }); }
+        catch (err) { alert(String(err.message || err)); users(); }
+      } });
+      return el('tr', {},
+        el('td', {}, u.username, u.username === (me && me.username) ? el('span', { class: 'muted' }, ' (you)') : null),
+        el('td', {}, roleSel),
+        el('td', {}, el('label', {}, enabled, ' enabled')),
+        el('td', { class: 'muted' }, truthy(u.must_change_password) ? 'must change pw' : ''),
+        el('td', { class: 'muted' }, fmt(u.last_login_at, 'never')),
+        el('td', {},
+          el('button', { class: 'link', onclick: async () => {
+            const p = prompt('New password for ' + u.username + ':');
+            if (!p) return;
+            try { await apiPatch('/users/' + encodeURIComponent(u.username), { password: p }); alert('password reset; user must change it on next login'); }
+            catch (err) { alert(String(err.message || err)); }
+          } }, 'reset pw'),
+          el('span', {}, ' '),
+          el('button', { class: 'btn ghost', title: 'delete user', onclick: async () => {
+            if (!confirm('Delete user "' + u.username + '"?')) return;
+            try { await apiDelete('/users/' + encodeURIComponent(u.username)); users(); }
+            catch (err) { alert(String(err.message || err)); }
+          } }, '✕')));
+    });
+    const tbl = el('table', {},
+      el('thead', {}, el('tr', {}, ...['User', 'Role', 'Status', '', 'Last login', 'Actions'].map(h => el('th', {}, h)))),
+      el('tbody', {}, ...rows));
+    app.replaceChildren(el('h2', {}, 'Users'), createCard, el('div', { class: 'card' }, el('div', { class: 'wrap' }, tbl)));
+  } catch (e) { showError(e); }
+}
+
 // ---- shell / router --------------------------------------------------------
 
 function setConn(t) { const c = document.getElementById('conn'); c.textContent = t; c.classList.remove('err'); }
@@ -908,10 +964,11 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots, tags, database };
+const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users };
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';
+  if (view === 'users' && !(me && me.role === 'admin')) view = 'dashboard';
   current = view;
   if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -919,10 +976,71 @@ function go(view, preset) {
   VIEWS[view](preset);
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.view));
-document.getElementById('tokenBtn').onclick = () => {
-  const t = prompt('API token (blank to clear). Only needed if the server sets SB_API_TOKEN.', token());
-  if (t === null) return;
-  if (t) localStorage.setItem('sb_token', t); else localStorage.removeItem('sb_token');
-};
 window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== current) go(v); });
-go(location.hash.slice(1) || 'dashboard');
+
+// ---- auth shell ------------------------------------------------------------
+
+let me = null;  // { username, role } when logged in
+
+function chrome(on) {
+  document.querySelector('nav').style.visibility = on ? 'visible' : 'hidden';
+  const ub = document.querySelector('nav button[data-view="users"]');
+  if (ub) ub.style.display = (on && me && me.role === 'admin') ? '' : 'none';
+  const acc = document.getElementById('account');
+  if (!on || !me) { acc.replaceChildren(); return; }
+  acc.replaceChildren(
+    el('span', { class: 'muted' }, `${me.username} · ${me.role}`),
+    el('button', { class: 'btn ghost', onclick: () => changePasswordScreen(false) }, 'Password'),
+    el('button', { class: 'btn ghost', onclick: async () => { try { await apiPost('/logout', {}); } catch (_e) { /* ignore */ } me = null; boot(); } }, 'Logout'));
+}
+
+function authScreen(title, fields, onSubmit, extra) {
+  chrome(false);
+  const status = el('div', { class: 'err-msg' });
+  const submit = () => onSubmit(status);
+  for (const f of fields) f.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  app.replaceChildren(el('div', { class: 'login' },
+    el('h1', {}, 'Star', el('span', {}, 'Base')),
+    el('div', { class: 'card loginbox' }, el('h3', {}, title),
+      extra || null, ...fields.map(f => el('div', { class: 'field' }, f)),
+      status, el('button', { class: 'btn primary', onclick: submit }, title))));
+  setTimeout(() => fields[0].focus(), 50);
+}
+
+function loginScreen(msg) {
+  const u = el('input', { placeholder: 'username' });
+  const p = el('input', { type: 'password', placeholder: 'password' });
+  authScreen('Log in', [u, p], async (status) => {
+    status.className = 'err-msg'; status.textContent = '';
+    try {
+      const r = await apiPost('/login', { username: u.value, password: p.value });
+      if (r.must_change_password) { changePasswordScreen(true); return; }
+      await boot();
+    } catch (e) { status.textContent = e.message || String(e); }
+  }, msg ? el('div', { class: 'muted' }, msg) : null);
+}
+
+function changePasswordScreen(forced) {
+  const cur = el('input', { type: 'password', placeholder: 'current password' });
+  const nw = el('input', { type: 'password', placeholder: 'new password' });
+  const cf = el('input', { type: 'password', placeholder: 'confirm new password' });
+  authScreen(forced ? 'Set a new password' : 'Change password', [cur, nw, cf], async (status) => {
+    status.className = 'err-msg';
+    if (nw.value !== cf.value) { status.textContent = 'passwords do not match'; return; }
+    try {
+      await apiPost('/me/password', { current_password: cur.value, new_password: nw.value });
+      status.className = 'ok-msg'; status.textContent = 'password changed';
+      setTimeout(boot, 700);
+    } catch (e) { status.textContent = e.message || String(e); }
+  }, forced ? el('div', { class: 'muted' }, 'This account must set a new password before continuing.') : null);
+}
+
+async function boot() {
+  try {
+    const m = await api('/me');
+    if (m.authenticated) { me = { username: m.username, role: m.role }; chrome(true); go(location.hash.slice(1) || 'dashboard'); }
+    else if (m.auth_required) { me = null; loginScreen(); }
+    else { me = null; chrome(true); go(location.hash.slice(1) || 'dashboard'); }  // open install
+  } catch (e) { showError(e); }
+}
+boot();

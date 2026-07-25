@@ -615,9 +615,17 @@ frame's tags and collections show as chips in its detail drawer. The
 **Database** tab reports schema version, server, the view list, per-table row
 counts and on-disk sizes (`GET /api/v1/db`), and files-by-status (with a jump to
 browse errored files), plus two safe maintenance actions: re-seed the header
-mapping (`POST /api/v1/db/seed`, idempotent) and rescan all roots. The only
-§11 tab still unbuilt is **Users** (token-only today; PBKDF2 users from
-NightWatcher2 not ported).
+mapping (`POST /api/v1/db/seed`, idempotent) and rescan all roots. The **Users**
+tab and the login flow port NightWatcher2's auth pattern (`sb_auth`:
+PBKDF2-HMAC-SHA256 with a per-user salt and iteration count, stored in the
+existing `users`/`sessions` tables): a login screen, an `sb_session` HttpOnly
+cookie, an account menu (change password, log out), and admin-only user
+management (create, set role admin/user/readonly, enable/disable, reset
+password, delete) with last-admin guards. A default `admin` / `admin` is seeded
+on first start with a forced password change. Writes require an admin/user
+session (or the static `SB_API_TOKEN`, which still acts as admin for scripts and
+the PJSR helper); reads stay open, and a fresh install with no users and no token
+stays open until the first admin exists. All eight §11 tabs are now built.
 
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:

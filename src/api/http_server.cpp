@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "action.hpp"
 #include "calibration.hpp"
 #include "fsinfo.hpp"
+#include "password.hpp"
 #include "logging.hpp"
 #include "mapping_loader.hpp"
 #include "query.hpp"
@@ -63,6 +65,25 @@ void send_error(httplib::Response& res, int status, const std::string& msg) {
     send_json(res, json{{"error", msg}}, status);
 }
 
+// Value of one cookie from the request's Cookie header, or empty.
+std::string get_cookie(const httplib::Request& req, const std::string& name) {
+    const std::string c = req.get_header_value("Cookie");
+    size_t pos = 0;
+    while (pos < c.size()) {
+        const size_t eq = c.find('=', pos);
+        if (eq == std::string::npos) break;
+        size_t ks = c.find_first_not_of(" \t", pos);
+        if (ks == std::string::npos) ks = pos;
+        const std::string key = c.substr(ks, eq - ks);
+        const size_t semi = c.find(';', eq);
+        const std::string val = c.substr(eq + 1, (semi == std::string::npos ? c.size() : semi) - eq - 1);
+        if (key == name) return val;
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+    }
+    return std::string();
+}
+
 // Clamp a query-string integer to a range, with a default.
 long qint(const httplib::Request& req, const char* key, long def, long lo, long hi) {
     if (!req.has_param(key)) return def;
@@ -87,13 +108,60 @@ struct HttpServer::Impl {
 
     db::Database db() { return db::Database(cfg.db); }
 
-    // A write endpoint is allowed when no token is configured (localhost trust)
-    // or the caller presents the matching token.
-    bool write_allowed(const httplib::Request& req) const {
-        if (cfg.token.empty()) return true;
-        if (req.get_header_value("X-SB-Token") == cfg.token) return true;
-        return req.has_param("token") && req.get_param_value("token") == cfg.token;
+    // The identity behind a request: the static admin token, or a login session
+    // (cookie sb_session, or an Authorization: Bearer that is not the token).
+    struct Caller { std::string username; std::string role; bool via_token = false; };
+
+    std::optional<Caller> authenticate(const httplib::Request& req) {
+        const std::string h = req.get_header_value("Authorization");
+        const std::string bearer = (h.rfind("Bearer ", 0) == 0) ? h.substr(7) : "";
+        if (!cfg.token.empty() &&
+            (req.get_header_value("X-SB-Token") == cfg.token || bearer == cfg.token ||
+             (req.has_param("token") && req.get_param_value("token") == cfg.token)))
+            return Caller{"(token)", "admin", true};
+
+        std::string sess = get_cookie(req, "sb_session");
+        if (sess.empty()) sess = bearer;
+        if (!sess.empty()) {
+            try {
+                auto d = db();
+                auto r = d.query(
+                    "SELECT u.username, u.role FROM sessions s JOIN users u ON u.id = s.user_id "
+                    "WHERE s.token = '" + d.escape(sess) + "' AND s.expires_at > UTC_TIMESTAMP() "
+                    "AND u.enabled = 1 LIMIT 1");
+                if (!r.empty() && r[0][0])
+                    return Caller{*r[0][0], r[0][1] ? *r[0][1] : "readonly", false};
+            } catch (const std::exception&) { /* fall through to unauthenticated */ }
+        }
+        return std::nullopt;
     }
+
+    bool any_users() {
+        try {
+            auto d = db();
+            auto r = d.query("SELECT COUNT(*) FROM users");
+            return !r.empty() && r[0][0] && std::stoll(*r[0][0]) > 0;
+        } catch (const std::exception&) { return false; }
+    }
+
+    // A write is allowed for an admin/user session or the static token. When no
+    // auth is configured at all (no token, no users) writes stay open, so a
+    // fresh localhost install keeps working until an admin is created.
+    bool write_allowed(const httplib::Request& req) {
+        if (auto c = authenticate(req)) return c->role == "admin" || c->role == "user";
+        return cfg.token.empty() && !any_users();
+    }
+
+    // Gate a user-management endpoint on an admin identity; sends 401/403 itself.
+    bool require_admin(const httplib::Request& req, httplib::Response& res) {
+        auto c = authenticate(req);
+        if (c && c->role == "admin") return true;
+        send_error(res, c ? 403 : 401, c ? "admin role required" : "login required");
+        return false;
+    }
+
+    // Seed an initial admin so a fresh install can be logged into. Idempotent.
+    void ensure_default_admin();
 
     void routes();
 };
@@ -932,9 +1000,194 @@ void HttpServer::Impl::routes() {
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
+    // ---- Authentication (NightWatcher2 pattern) ---------------------------
+    const int kSessionTtl = 7 * 24 * 3600;  // 7 days
+
+    // POST /login {username, password} -> sets the sb_session cookie.
+    server->Post("/api/v1/login", [this, kSessionTtl](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+            const std::string user = body.value("username", "");
+            const std::string pass = body.value("password", "");
+            if (user.empty() || pass.empty()) { send_error(res, 400, "username and password required"); return; }
+            auto d = db();
+            auto r = d.query("SELECT id, HEX(pwd_salt), HEX(pwd_hash), pwd_iterations, role, "
+                             "enabled, must_change_password FROM users WHERE username = '" +
+                             d.escape(user) + "' LIMIT 1");
+            if (r.empty() || !r[0][0] ||
+                !starbase::auth::verify_password(pass, r[0][1].value_or(""), r[0][2].value_or(""),
+                                                 r[0][3] ? std::stoi(*r[0][3]) : 0)) {
+                send_error(res, 401, "invalid credentials"); return;
+            }
+            if (r[0][5] && *r[0][5] == "0") { send_error(res, 403, "account is disabled"); return; }
+            const std::string sess = starbase::auth::random_hex(32);
+            d.exec("INSERT INTO sessions (token, user_id, expires_at, remote_addr, user_agent) VALUES ('" +
+                   d.escape(sess) + "', " + *r[0][0] + ", UTC_TIMESTAMP() + INTERVAL " +
+                   std::to_string(kSessionTtl) + " SECOND, '" + d.escape(req.remote_addr) + "', '" +
+                   d.escape(req.get_header_value("User-Agent").substr(0, 255)) + "')");
+            d.exec("UPDATE users SET last_login_at = UTC_TIMESTAMP() WHERE id = " + std::string(*r[0][0]));
+            res.set_header("Set-Cookie", "sb_session=" + sess +
+                           "; HttpOnly; SameSite=Strict; Path=/; Max-Age=" + std::to_string(kSessionTtl));
+            send_json(res, json{{"token", sess}, {"username", user}, {"role", cell(r[0], 4)},
+                                {"must_change_password", r[0][6] && *r[0][6] == "1"}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Post("/api/v1/logout", [this](const httplib::Request& req, httplib::Response& res) {
+        std::string sess = get_cookie(req, "sb_session");
+        if (sess.empty()) { const std::string h = req.get_header_value("Authorization"); if (h.rfind("Bearer ", 0) == 0) sess = h.substr(7); }
+        try { if (!sess.empty()) { auto d = db(); d.exec("DELETE FROM sessions WHERE token = '" + d.escape(sess) + "'"); } }
+        catch (const std::exception&) { /* best effort */ }
+        res.set_header("Set-Cookie", "sb_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        send_json(res, json{{"ok", true}});
+    });
+
+    // GET /me -> current identity, or {authenticated:false} when open/anonymous.
+    server->Get("/api/v1/me", [this](const httplib::Request& req, httplib::Response& res) {
+        auto c = authenticate(req);
+        if (c) { send_json(res, json{{"authenticated", true}, {"username", c->username}, {"role", c->role}, {"via", c->via_token ? "token" : "session"}}); return; }
+        // Not logged in: tell the UI whether auth is even set up, so it knows
+        // whether to demand a login or run open.
+        send_json(res, json{{"authenticated", false}, {"auth_required", cfg.token.empty() ? any_users() : true}});
+    });
+
+    // POST /me/password {current_password, new_password} for the logged-in user.
+    server->Post("/api/v1/me/password", [this](const httplib::Request& req, httplib::Response& res) {
+        auto c = authenticate(req);
+        if (!c || c->via_token) { send_error(res, 401, "log in with a user account to change a password"); return; }
+        try {
+            json body = json::parse(req.body);
+            const std::string cur = body.value("current_password", ""), nw = body.value("new_password", "");
+            if (nw.size() < 4) { send_error(res, 400, "new password too short"); return; }
+            auto d = db();
+            auto r = d.query("SELECT HEX(pwd_salt), HEX(pwd_hash), pwd_iterations FROM users WHERE username = '" + d.escape(c->username) + "'");
+            if (r.empty() || !starbase::auth::verify_password(cur, r[0][0].value_or(""), r[0][1].value_or(""), r[0][2] ? std::stoi(*r[0][2]) : 0)) {
+                send_error(res, 403, "current password is incorrect"); return;
+            }
+            const auto hp = starbase::auth::hash_password(nw);
+            d.exec("UPDATE users SET pwd_hash = UNHEX('" + hp.hash_hex + "'), pwd_salt = UNHEX('" + hp.salt_hex +
+                   "'), pwd_iterations = " + std::to_string(hp.iterations) +
+                   ", must_change_password = 0 WHERE username = '" + d.escape(c->username) + "'");
+            send_json(res, json{{"ok", true}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- User management (admin only) ----
+    server->Get("/api/v1/users", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            auto rows = d.query("SELECT id, username, role, enabled, must_change_password, "
+                                "DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%sZ'), "
+                                "DATE_FORMAT(last_login_at,'%Y-%m-%dT%H:%i:%sZ') FROM users ORDER BY username");
+            send_json(res, rows_to_json(rows, {"id", "username", "role", "enabled",
+                                               "must_change_password", "created_at", "last_login_at"}));
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Post("/api/v1/users", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            const std::string user = body.value("username", ""), pass = body.value("password", "");
+            std::string role = body.value("role", "user");
+            if (user.empty() || pass.empty()) { send_error(res, 400, "username and password required"); return; }
+            if (role != "admin" && role != "user" && role != "readonly") { send_error(res, 400, "role must be admin, user, or readonly"); return; }
+            auto d = db();
+            auto ex = d.query("SELECT 1 FROM users WHERE username = '" + d.escape(user) + "'");
+            if (!ex.empty()) { send_error(res, 409, "user already exists"); return; }
+            const auto hp = starbase::auth::hash_password(pass);
+            d.exec("INSERT INTO users (username, pwd_hash, pwd_salt, pwd_iterations, role, must_change_password) "
+                   "VALUES ('" + d.escape(user) + "', UNHEX('" + hp.hash_hex + "'), UNHEX('" + hp.salt_hex +
+                   "'), " + std::to_string(hp.iterations) + ", '" + d.escape(role) + "', " +
+                   (body.value("must_change_password", false) ? "1" : "0") + ")");
+            send_json(res, json{{"username", user}, {"role", role}}, 201);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // PATCH /users/:name  {role?, enabled?} ; DELETE /users/:name
+    server->Patch(R"(/api/v1/users/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            const std::string user = req.matches[1];
+            json body = json::parse(req.body);
+            auto d = db();
+            auto u = d.query("SELECT role FROM users WHERE username = '" + d.escape(user) + "'");
+            if (u.empty()) { send_error(res, 404, "no such user"); return; }
+            std::vector<std::string> sets;
+            if (body.contains("role")) {
+                const std::string role = body["role"].get<std::string>();
+                if (role != "admin" && role != "user" && role != "readonly") { send_error(res, 400, "bad role"); return; }
+                // Don't let the last admin be demoted out of adminship.
+                if (u[0][0] && *u[0][0] == "admin" && role != "admin") {
+                    auto a = d.query("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1");
+                    if (!a.empty() && a[0][0] && std::stoll(*a[0][0]) <= 1) { send_error(res, 409, "cannot demote the last admin"); return; }
+                }
+                sets.push_back("role = '" + d.escape(role) + "'");
+            }
+            if (body.contains("enabled")) {
+                const bool en = body["enabled"].get<bool>();
+                if (!en && u[0][0] && *u[0][0] == "admin") {
+                    auto a = d.query("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1");
+                    if (!a.empty() && a[0][0] && std::stoll(*a[0][0]) <= 1) { send_error(res, 409, "cannot disable the last admin"); return; }
+                }
+                sets.push_back(std::string("enabled = ") + (en ? "1" : "0"));
+            }
+            if (body.contains("password")) {
+                const auto hp = starbase::auth::hash_password(body["password"].get<std::string>());
+                sets.push_back("pwd_hash = UNHEX('" + hp.hash_hex + "')");
+                sets.push_back("pwd_salt = UNHEX('" + hp.salt_hex + "')");
+                sets.push_back("pwd_iterations = " + std::to_string(hp.iterations));
+                sets.push_back("must_change_password = 1");
+            }
+            if (sets.empty()) { send_error(res, 400, "nothing to update"); return; }
+            std::string sql = "UPDATE users SET ";
+            for (size_t i = 0; i < sets.size(); ++i) sql += (i ? ", " : "") + sets[i];
+            sql += " WHERE username = '" + d.escape(user) + "'";
+            d.exec(sql);
+            send_json(res, json{{"updated", user}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/users/([^/]+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            const std::string user = req.matches[1];
+            auto d = db();
+            auto u = d.query("SELECT role FROM users WHERE username = '" + d.escape(user) + "'");
+            if (u.empty()) { send_error(res, 404, "no such user"); return; }
+            if (u[0][0] && *u[0][0] == "admin") {
+                auto a = d.query("SELECT COUNT(*) FROM users WHERE role='admin'");
+                if (!a.empty() && a[0][0] && std::stoll(*a[0][0]) <= 1) { send_error(res, 409, "cannot delete the last admin"); return; }
+            }
+            d.exec("DELETE FROM users WHERE username = '" + d.escape(user) + "'");
+            send_json(res, json{{"deleted", user}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     // ---- static web UI at / ----
     if (!cfg.web_root.empty()) {
         server->set_mount_point("/", cfg.web_root);
+    }
+}
+
+void HttpServer::Impl::ensure_default_admin() {
+    try {
+        auto d = db();
+        auto r = d.query("SELECT COUNT(*) FROM users");
+        if (!r.empty() && r[0][0] && std::stoll(*r[0][0]) > 0) return;
+        const auto hp = starbase::auth::hash_password("admin");
+        d.exec("INSERT INTO users (username, pwd_hash, pwd_salt, pwd_iterations, role, must_change_password) "
+               "VALUES ('admin', UNHEX('" + hp.hash_hex + "'), UNHEX('" + hp.salt_hex + "'), " +
+               std::to_string(hp.iterations) + ", 'admin', 1)");
+        starbase::log_warn("seeded default admin user 'admin' / 'admin' - log in and change the "
+                           "password immediately (Users tab or the account menu)");
+    } catch (const std::exception& e) {
+        starbase::log_warn(std::string("could not seed default admin: ") + e.what());
     }
 }
 
@@ -967,6 +1220,7 @@ void HttpServer::start() {
     }
 
     impl_->routes();
+    impl_->ensure_default_admin();
     if (!impl_->server->bind_to_port(bind.c_str(), port))
         throw std::runtime_error("cannot bind API to " + bind + ":" + std::to_string(port) +
                                  " (in use?)");
