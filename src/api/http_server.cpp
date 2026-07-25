@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "calibration.hpp"
 #include "logging.hpp"
 #include "mapping_loader.hpp"
 #include "query.hpp"
@@ -302,6 +303,44 @@ void HttpServer::Impl::routes() {
             d.exec("DELETE FROM saved_queries WHERE id = " + d.escape(req.matches[1]));
             send_json(res, json{{"deleted", std::stoi(req.matches[1])}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- GET /api/v1/frames/:id/calibration  (matched darks/flats/bias) ----
+    server->Get(R"(/api/v1/frames/(\d+)/calibration)", [this](const httplib::Request& req,
+                                                              httplib::Response& res) {
+        try {
+            auto d = db();
+            const long long id = std::stoll(req.matches[1]);
+            auto key = starbase::match::light_key_for(d, id);
+            if (!key) { send_error(res, 404, "no such light frame"); return; }
+            const int limit = static_cast<int>(qint(req, "limit", 10, 1, 100));
+
+            json out = json::array();
+            for (const auto& m : starbase::match::match_calibration(d, *key, limit)) {
+                json group;
+                group["target_type"] = m.target_type;
+                group["rule"] = m.rule_name;
+                group["total"] = m.total;
+                if (!m.warning.empty()) group["warning"] = m.warning;
+                json cands = json::array();
+                for (const auto& c : m.candidates) {
+                    cands.push_back({{"frame_id", c.frame_id},
+                                     {"image_type", c.image_type},
+                                     {"is_master", c.is_master},
+                                     {"filename", c.filename},
+                                     {"abs_path", c.abs_path},
+                                     {"session_night", c.session_night},
+                                     {"date_obs_utc", c.date_obs_utc},
+                                     {"score", c.score},
+                                     {"reason", c.reason}});
+                }
+                group["candidates"] = cands;
+                out.push_back(std::move(group));
+            }
+            send_json(res, out);
+        } catch (const std::exception& e) {
+            send_error(res, 500, e.what());
+        }
     });
 
     // ---- GET /api/v1/summary  (dashboard aggregates) ----

@@ -134,10 +134,16 @@ if(SB_WITH_DB)
         target_include_directories(sb_query PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/query)
         target_link_libraries(sb_query PUBLIC sb_db sb_httplib)
 
+        # Calibration matcher: darks/flats/bias/dark-flats for a light, ranked
+        # and explained, driven by the declarative calibration_rules.
+        add_library(sb_match STATIC src/match/calibration.cpp)
+        target_include_directories(sb_match PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/match)
+        target_link_libraries(sb_match PUBLIC sb_db sb_httplib)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -227,6 +233,10 @@ if(SB_BUILD_TESTS)
             add_executable(query_test tests/query_test.cpp)
             target_link_libraries(query_test PRIVATE sb_query)
             add_test(NAME query_test COMMAND query_test)
+
+            add_executable(match_test tests/match_test.cpp)
+            target_link_libraries(match_test PRIVATE sb_match)
+            add_test(NAME match_test COMMAND match_test)
         endif()
     endif()
 endif()
