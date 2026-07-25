@@ -40,6 +40,9 @@ struct ApiConfig {
     std::string staging_root;
     std::string trash_root;
     std::string link_mode = "symlink";
+    // Optional online target-name resolution (CDS Sesame). Off by default.
+    bool sesame_enabled = false;
+    std::string sesame_url = "https://cds.unistra.fr";
     // Invoked when the UI asks to apply changed server settings (bind/port/tls).
     // The daemon wires this to rebind the API server; empty means not supported.
     std::function<void()> on_apply;

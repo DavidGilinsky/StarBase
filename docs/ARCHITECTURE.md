@@ -201,6 +201,22 @@ store are format-agnostic; `read_header` dispatches on the signature. No
 PixInsight code is involved. Validated against all 294 real XISF masters in the
 archive (0 failures).
 
+**Target names.** FITS prescribes no syntax for `OBJECT` (it is free text), so a
+target is written many ways: `M31`, `M 31`, `NGC_7000`. StarBase keeps the raw
+value in `frames.object` and fills `frames.object_canonical` with a normalized
+form. The offline canonicalizer (`sb_names`) recognizes the common catalogs (M,
+NGC, IC, UGC, PGC, Arp, Abell, Sh2, LBN, LDN, Cr, Mel, vdB, Ced, B, Caldwell),
+applies the CDS/IAU spacing (`M101` -> `M 101`), and flags placeholders
+(`Target`, `FlatWizard`) rather than mangling them; it runs in the resolver, so
+every scan produces a canonical name. Optionally — off by default, the only
+feature that reaches the network — a CDS **Sesame** lookup (`sb_sesame`)
+resolves any alias to its SIMBAD identifier and J2000 coordinates
+(`NGC 224` -> `M 31`), cached in `object_names`. The admin **Target names** view
+(`GET /api/v1/objects`, `POST .../resolve`, `POST .../apply`) reviews the
+distinct raw names with their offline and Sesame proposals and writes the chosen
+canonical into `object_canonical` (a dry-run reports the affected frame counts;
+the raw card is never touched). `object_canonical` is a queryable field.
+
 **Sidecars** (`.txt`/`.json`/`.csv`/`.log` logs written alongside frames,
 NINA/TSX artifacts) are recorded in an `artifacts` table, not parsed for
 metadata in v1. *Implemented (M9)*: the walk enqueues sidecar-class files, the

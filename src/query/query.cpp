@@ -26,7 +26,8 @@ enum class Type { Str, Num, Date };
 // out of the compiled SQL.
 const std::map<std::string, Type>& fields() {
     static const std::map<std::string, Type> m = {
-        {"image_type", Type::Str},  {"object", Type::Str},   {"filter", Type::Str},
+        {"image_type", Type::Str},  {"object", Type::Str},   {"object_canonical", Type::Str},
+        {"filter", Type::Str},
         {"rig", Type::Str},         {"camera", Type::Str},   {"site", Type::Str},
         {"bucket", Type::Str},      {"file_status", Type::Str}, {"root_label", Type::Str},
         {"pier_side", Type::Str},   {"row_order", Type::Str},

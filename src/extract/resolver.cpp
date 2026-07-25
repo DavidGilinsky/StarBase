@@ -9,6 +9,8 @@
 // ---------------------------------------------------------------------------
 #include "resolver.hpp"
 
+#include "canon.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -201,7 +203,12 @@ ResolvedFrame resolve(const fits::Hdu& hdu, const HeaderMapping& mapping,
     // which maps to empty and is suppressed rather than stored as a target.
     if (auto raw = resolve_raw(hdu, mapping, "object")) {
         const std::string norm = normalize_value(mapping, "object", *raw);
-        if (!norm.empty()) f.object = norm;
+        if (!norm.empty()) {
+            f.object = norm;
+            // Catalog-canonical form (M101 -> "M 101"); skip placeholders.
+            const auto c = starbase::names::canonicalize(norm);
+            if (!c.placeholder) f.object_canonical = c.canonical;
+        }
     }
     if (auto raw = resolve_raw(hdu, mapping, "ra"))  f.ra_deg = parse_coord(*raw, /*is_ra=*/true);
     if (auto raw = resolve_raw(hdu, mapping, "dec")) f.dec_deg = parse_coord(*raw, /*is_ra=*/false);

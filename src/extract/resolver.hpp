@@ -54,6 +54,7 @@ struct ResolvedFrame {
     std::optional<ImageType> master_of;   // when image_type == Master
 
     std::optional<std::string> object;            // as written
+    std::optional<std::string> object_canonical;  // catalog-canonical form
     std::optional<double>      ra_deg;            // decimal degrees
     std::optional<double>      dec_deg;
 

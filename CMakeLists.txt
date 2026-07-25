@@ -62,6 +62,11 @@ target_include_directories(sb_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(sb_core PUBLIC sb_warnings Threads::Threads)
 
+# Target-name canonicalization (offline). Pure, no DB, so it stands alone.
+add_library(sb_names STATIC src/names/canon.cpp)
+target_include_directories(sb_names PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/names)
+target_link_libraries(sb_names PUBLIC sb_warnings)
+
 # ---- Optional dependency probing ----
 if(SB_WITH_DB OR SB_WITH_FITS)
     find_package(PkgConfig REQUIRED)
@@ -83,7 +88,7 @@ if(SB_WITH_FITS)
         src/extract/resolver.cpp
         src/extract/resolver_defaults.cpp)
     target_include_directories(sb_extract PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/extract)
-    target_link_libraries(sb_extract PUBLIC sb_fits)
+    target_link_libraries(sb_extract PUBLIC sb_fits sb_names)
 
     # Throughput benchmark (dev tool; not installed): measures header-read
     # concurrency scaling against a real archive to size the scanner's workers.
@@ -156,10 +161,16 @@ if(SB_WITH_DB)
         target_include_directories(sb_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/auth)
         target_link_libraries(sb_auth PUBLIC sb_warnings OpenSSL::Crypto)
 
+        # Optional online target-name resolution (CDS Sesame). Needs an HTTP
+        # client, so it links httplib; the offline canonicalizer stays pure.
+        add_library(sb_sesame STATIC src/names/sesame.cpp)
+        target_include_directories(sb_sesame PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/names)
+        target_link_libraries(sb_sesame PUBLIC sb_httplib sb_warnings)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_pix sb_auth sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_pix sb_auth sb_names sb_sesame sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -203,6 +214,11 @@ if(SB_BUILD_TESTS)
     add_executable(fsinfo_test tests/fsinfo_test.cpp)
     target_link_libraries(fsinfo_test PRIVATE sb_core)
     add_test(NAME fsinfo_test COMMAND fsinfo_test)
+
+    # Target-name canonicalization is pure: no database.
+    add_executable(canon_test tests/canon_test.cpp)
+    target_link_libraries(canon_test PRIVATE sb_names)
+    add_test(NAME canon_test COMMAND canon_test)
 
     if(SB_WITH_FITS)
         # Hermetic: writes a synthetic FITS and reads it back. Also checks a real

@@ -141,6 +141,7 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
                                      ? "'" + std::string(extract::to_string(rf.image_type)) + "'"
                                      : "'unknown'");
             fr.str("object", rf.object);
+            fr.str("object_canonical", rf.object_canonical);
             fr.real("ra_deg", rf.ra_deg);
             fr.real("dec_deg", rf.dec_deg);
             fr.str("date_obs_utc", rf.date_obs_utc);

@@ -925,8 +925,10 @@ async function database() {
           mstatus.replaceChildren(el('span', { class: 'muted' }, 'scanning all roots…'));
           try { const r = await apiPost('/scan', {}); mstatus.replaceChildren(el('span', { class: 'ok-msg' }, r.map(x => `${x.root}: ${x.frames} frames`).join(' · ') || 'nothing to scan')); database(); }
           catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
-        } }, 'Rescan all roots'), mstatus),
-      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Rescanning re-indexes every enabled root.'));
+        } }, 'Rescan all roots'),
+        me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('targets') }, 'Review target names →') : null,
+        mstatus),
+      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Rescanning re-indexes every enabled root. Target-name normalization canonicalizes OBJECT values (M101 → “M 101”).'));
 
     app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, tablesCard, maint);
   } catch (e) { showError(e); }
@@ -985,6 +987,82 @@ async function users() {
       el('thead', {}, el('tr', {}, ...['User', 'Role', 'Status', '', 'Last login', 'Actions'].map(h => el('th', {}, h)))),
       el('tbody', {}, ...rows));
     app.replaceChildren(el('h2', {}, 'Users'), createCard, el('div', { class: 'card' }, el('div', { class: 'wrap' }, tbl)));
+  } catch (e) { showError(e); }
+}
+
+// ---- Target names (review & normalize) -------------------------------------
+
+async function targets() {
+  app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+  try {
+    const data = await api('/objects');
+    const list = data.objects || [];
+    const sesameOn = !!data.sesame_enabled;
+    const gstatus = el('span', {});
+
+    // Each row keeps an editable target, pre-filled with the best proposal
+    // (Sesame identity if resolved, else the offline catalog form).
+    const inputs = new Map();
+    const rowEls = list.map(o => {
+      const best = (o.sesame && o.sesame.name) ? o.sesame.name : o.offline;
+      const inp = el('input', { value: o.placeholder ? '' : best, disabled: o.placeholder, style: 'width:12em' });
+      inputs.set(o.raw, { inp, o });
+      const ses = o.sesame && o.sesame.name
+        ? el('td', { class: 'muted' }, `${o.sesame.name}${o.sesame.otype ? ' · ' + o.sesame.otype : ''}${o.sesame.ra_deg != null ? ` · ${num(o.sesame.ra_deg, 3)}, ${num(o.sesame.dec_deg, 3)}` : ''}`)
+        : el('td', { class: 'muted' }, o.placeholder ? '' : '—');
+      return el('tr', { class: o.placeholder ? 'muted' : '' },
+        el('td', { class: 'mono' }, o.raw),
+        el('td', { class: 'num' }, Number(o.count).toLocaleString()),
+        el('td', {}, o.placeholder ? el('span', { class: 'pill' }, 'placeholder') : fmt(o.current, '—')),
+        el('td', { class: o.changed ? 'warn' : 'muted' }, o.offline),
+        ses,
+        el('td', {}, inp));
+    });
+
+    const tbl = el('table', {},
+      el('thead', {}, el('tr', {}, ...['Raw OBJECT', 'Frames', 'Current', 'Offline', 'Sesame (SIMBAD)', 'Apply as'].map(h => el('th', {}, h)))),
+      el('tbody', {}, ...rowEls));
+
+    const collectMapping = () => {
+      const m = {};
+      for (const [raw, { inp, o }] of inputs) {
+        const v = inp.value.trim();
+        if (!o.placeholder && v && v !== (o.current || '')) m[raw] = v;
+      }
+      return m;
+    };
+    const apply = async () => {
+      const mapping = collectMapping();
+      if (!Object.keys(mapping).length) { gstatus.replaceChildren(el('span', { class: 'muted' }, 'nothing to change')); return; }
+      gstatus.replaceChildren(el('span', { class: 'muted' }, 'previewing…'));
+      try {
+        const dry = await apiPost('/objects/apply', { dry_run: true, mapping });
+        if (!confirm(`Set object_canonical on ${dry.total_frames.toLocaleString()} frame(s) across ${dry.changes.length} target name(s)?\n\nThe raw OBJECT card is preserved.`)) { gstatus.replaceChildren(); return; }
+        const r = await apiPost('/objects/apply', { dry_run: false, mapping });
+        gstatus.replaceChildren(el('span', { class: 'ok-msg' }, `Normalized ${r.total_frames.toLocaleString()} frame(s).`));
+        targets();
+      } catch (e) { gstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    };
+    const resolve = async () => {
+      gstatus.replaceChildren(el('span', { class: 'muted' }, 'resolving via CDS Sesame… (this reaches the network)'));
+      try {
+        const names = list.filter(o => !o.placeholder).map(o => o.raw);
+        await apiPost('/objects/resolve', { names });
+        gstatus.replaceChildren(el('span', { class: 'ok-msg' }, 'resolved; review the SIMBAD column'));
+        targets();
+      } catch (e) { gstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    };
+
+    app.replaceChildren(el('h2', {}, 'Target names'),
+      el('div', { class: 'card' },
+        el('div', { class: 'muted' }, 'FITS prescribes no format for OBJECT. StarBase canonicalizes catalog names to the CDS/IAU form (M101 → “M 101”), stored in object_canonical; the raw OBJECT card is kept. Edit any “Apply as” value before applying.'),
+        el('div', { class: 'row', style: 'margin-top:.6rem' },
+          el('button', { class: 'btn primary', onclick: apply }, 'Apply changes'),
+          sesameOn
+            ? el('button', { class: 'btn', onclick: resolve }, 'Resolve all via Sesame')
+            : el('span', { class: 'muted' }, 'Online Sesame resolution is off (enable [names] sesame_enabled in the config).'),
+          gstatus)),
+      el('div', { class: 'card' }, el('div', { class: 'wrap' }, tbl)));
   } catch (e) { showError(e); }
 }
 
@@ -1050,8 +1128,8 @@ function showError(e) {
   const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.classList.add('err');
 }
 
-const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users, server };
-const ADMIN_VIEWS = ['users', 'server'];
+const VIEWS = { dashboard, browse, query, jobs, roots, tags, database, users, server, targets };
+const ADMIN_VIEWS = ['users', 'server', 'targets'];
 let current = 'dashboard';
 function go(view, preset) {
   if (!VIEWS[view]) view = 'dashboard';

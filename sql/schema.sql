@@ -756,6 +756,29 @@ CREATE TABLE IF NOT EXISTS settings (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------------
+-- Target-name resolution cache
+--
+-- FITS prescribes no OBJECT-name format, so a target can be written many ways
+-- (M31, M 31, NGC_7000). This caches the canonical form per raw value: the
+-- offline catalog canonicalizer, and optionally an online CDS Sesame lookup
+-- (identifier + J2000 coordinates). Keyed by the raw value; frames keep their
+-- raw OBJECT card, so provenance is never lost.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS object_names (
+    raw         VARCHAR(128) NOT NULL,
+    canonical   VARCHAR(128) NULL,
+    catalog     VARCHAR(32)  NULL,
+    ra_deg      DOUBLE       NULL,
+    dec_deg     DOUBLE       NULL,
+    otype       VARCHAR(64)  NULL,
+    source      ENUM('offline','sesame') NOT NULL DEFAULT 'offline',
+    placeholder TINYINT(1)   NOT NULL DEFAULT 0,
+    resolved_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (raw)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------------
 -- Views
 -- ---------------------------------------------------------------------------
 

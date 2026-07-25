@@ -73,6 +73,11 @@ struct Config {
     std::string trash_root = "/var/lib/starbase/trash";
     std::string link_mode = "symlink";       // symlink | hardlink | copy
 
+    // [names] optional online target-name resolution (CDS Sesame). Off by
+    // default: it is the only feature that reaches the network.
+    bool sesame_enabled = false;
+    std::string sesame_url = "https://cds.unistra.fr";
+
     // [pixinsight]
     std::string pixinsight_binary = "/opt/PixInsight/bin/PixInsight.sh";
     std::string wbpp_script =

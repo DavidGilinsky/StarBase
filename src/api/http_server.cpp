@@ -29,8 +29,10 @@
 
 #include "action.hpp"
 #include "calibration.hpp"
+#include "canon.hpp"
 #include "fsinfo.hpp"
 #include "password.hpp"
+#include "sesame.hpp"
 #include "logging.hpp"
 #include "mapping_loader.hpp"
 #include "query.hpp"
@@ -1204,6 +1206,104 @@ void HttpServer::Impl::routes() {
             d.exec("DELETE FROM users WHERE username = '" + d.escape(user) + "'");
             send_json(res, json{{"deleted", user}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Target-name normalization ----------------------------------------
+    // Distinct raw OBJECT values with their frame counts, the currently stored
+    // canonical, an offline catalog proposal, and any cached Sesame resolution.
+    server->Get("/api/v1/objects", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query(
+                "SELECT object, MAX(object_canonical), COUNT(*) FROM frames "
+                "WHERE object IS NOT NULL AND object <> '' GROUP BY object ORDER BY object");
+            json cache = json::object();
+            for (const auto& c : d.query("SELECT raw, canonical, ra_deg, dec_deg, otype "
+                                         "FROM object_names WHERE source = 'sesame'"))
+                if (c[0]) cache[*c[0]] = {{"name", cell(c, 1)}, {"ra_deg", cell(c, 2)},
+                                          {"dec_deg", cell(c, 3)}, {"otype", cell(c, 4)}};
+            json arr = json::array();
+            for (const auto& r : rows) {
+                const std::string raw = r[0] ? *r[0] : "";
+                const auto c = starbase::names::canonicalize(raw);
+                json o = {{"raw", raw}, {"count", r[2] ? std::stoll(*r[2]) : 0},
+                          {"current", cell(r, 1)}, {"offline", c.canonical},
+                          {"catalog", c.catalog}, {"placeholder", c.placeholder},
+                          {"changed", c.changed}};
+                o["sesame"] = cache.contains(raw) ? cache[raw] : json(nullptr);
+                arr.push_back(std::move(o));
+            }
+            send_json(res, json{{"sesame_enabled", cfg.sesame_enabled}, {"objects", arr}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // Resolve names through CDS Sesame (opt-in) and cache the results. Admin.
+    server->Post("/api/v1/objects/resolve", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        if (!cfg.sesame_enabled) { send_error(res, 400, "Sesame is disabled; set [names] sesame_enabled = on"); return; }
+        try {
+            auto d = db();
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::vector<std::string> names;
+            if (body.contains("names") && body["names"].is_array())
+                for (const auto& n : body["names"]) names.push_back(n.get<std::string>());
+            else
+                for (const auto& r : d.query("SELECT DISTINCT object FROM frames WHERE object IS NOT NULL AND object <> ''"))
+                    if (r[0]) names.push_back(*r[0]);
+            json out = json::array();
+            for (const auto& raw : names) {
+                if (starbase::names::canonicalize(raw).placeholder) { out.push_back({{"raw", raw}, {"skipped", "placeholder"}}); continue; }
+                const auto sr = starbase::names::sesame_resolve(raw, cfg.sesame_url);
+                if (sr.ok) {
+                    d.exec("INSERT INTO object_names (raw, canonical, ra_deg, dec_deg, otype, source, placeholder) VALUES ('" +
+                           d.escape(raw) + "', " + (sr.name.empty() ? "NULL" : "'" + d.escape(sr.name) + "'") + ", " +
+                           (sr.has_coords ? std::to_string(sr.ra_deg) : "NULL") + ", " +
+                           (sr.has_coords ? std::to_string(sr.dec_deg) : "NULL") + ", " +
+                           (sr.otype.empty() ? "NULL" : "'" + d.escape(sr.otype) + "'") + ", 'sesame', 0) "
+                           "ON DUPLICATE KEY UPDATE canonical=VALUES(canonical), ra_deg=VALUES(ra_deg), "
+                           "dec_deg=VALUES(dec_deg), otype=VALUES(otype), source='sesame'");
+                    out.push_back({{"raw", raw}, {"name", sr.name}, {"otype", sr.otype},
+                                   {"ra_deg", sr.ra_deg}, {"dec_deg", sr.dec_deg}, {"has_coords", sr.has_coords}});
+                } else {
+                    out.push_back({{"raw", raw}, {"error", sr.error}});
+                }
+            }
+            send_json(res, out);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // Write a raw -> canonical mapping into frames.object_canonical (raw OBJECT
+    // is preserved). Dry-run by default: preview the per-name frame counts.
+    server->Post("/api/v1/objects/apply", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            if (!body.contains("mapping") || !body["mapping"].is_object()) { send_error(res, 400, "mapping is required"); return; }
+            const bool dry = body.value("dry_run", true);
+            auto d = db();
+            json changes = json::array();
+            long long total = 0;
+            for (auto& [raw, v] : body["mapping"].items()) {
+                if (!v.is_string()) continue;
+                const std::string canon = v.get<std::string>();
+                if (canon.empty()) continue;
+                auto cnt = d.query("SELECT COUNT(*) FROM frames WHERE object = '" + d.escape(raw) +
+                                   "' AND (object_canonical IS NULL OR object_canonical <> '" + d.escape(canon) + "')");
+                const long long n = (!cnt.empty() && cnt[0][0]) ? std::stoll(*cnt[0][0]) : 0;
+                if (n == 0) continue;
+                total += n;
+                changes.push_back({{"raw", raw}, {"canonical", canon}, {"frames", n}});
+                if (!dry) {
+                    d.exec("UPDATE frames SET object_canonical = '" + d.escape(canon) + "' WHERE object = '" + d.escape(raw) + "'");
+                    d.exec("INSERT INTO object_names (raw, canonical, source, placeholder) VALUES ('" +
+                           d.escape(raw) + "', '" + d.escape(canon) + "', 'offline', 0) "
+                           "ON DUPLICATE KEY UPDATE canonical=VALUES(canonical)");
+                }
+            }
+            send_json(res, json{{"dry_run", dry}, {"total_frames", total}, {"changes", changes}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- Server settings (bind/port/tls) ----------------------------------

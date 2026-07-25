@@ -138,6 +138,9 @@ Config Config::load(const std::string& path) {
         } else if (section == "pixinsight") {
             if (key == "binary") cfg.pixinsight_binary = val;
             else if (key == "wbpp_script") cfg.wbpp_script = val;
+        } else if (section == "names") {
+            if (key == "sesame_enabled") cfg.sesame_enabled = (lower(val) == "on" || lower(val) == "true" || val == "1");
+            else if (key == "sesame_url") cfg.sesame_url = val;
         }
         // Unknown sections and keys are ignored on purpose, so a config file
         // from a newer version does not stop an older daemon from starting.

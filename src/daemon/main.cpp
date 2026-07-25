@@ -143,6 +143,8 @@ int main(int argc, char** argv) {
         api.staging_root = cfg.staging_root;
         api.trash_root = cfg.trash_root;
         api.link_mode = cfg.link_mode;
+        api.sesame_enabled = cfg.sesame_enabled;
+        api.sesame_url = cfg.sesame_url;
         api.db.host = cfg.db_host;
         api.db.port = static_cast<uint16_t>(cfg.db_port);
         api.db.user = cfg.db_user;
