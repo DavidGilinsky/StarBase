@@ -145,10 +145,16 @@ if(SB_WITH_DB)
         target_include_directories(sb_action PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/action)
         target_link_libraries(sb_action PUBLIC sb_query)
 
+        # PixInsight/WBPP bridge: render command-line automation from a staged
+        # tree. Pure (no DB, no PixInsight), so it stands on its own.
+        add_library(sb_pix STATIC src/pix/wbpp.cpp)
+        target_include_directories(sb_pix PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/pix)
+        target_link_libraries(sb_pix PUBLIC sb_warnings)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_match sb_action sb_pix sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -246,6 +252,11 @@ if(SB_BUILD_TESTS)
             add_executable(action_test tests/action_test.cpp)
             target_link_libraries(action_test PRIVATE sb_action)
             add_test(NAME action_test COMMAND action_test)
+
+            # WBPP renderer is pure: it runs with no database and no PixInsight.
+            add_executable(wbpp_test tests/wbpp_test.cpp)
+            target_link_libraries(wbpp_test PRIVATE sb_pix)
+            add_test(NAME wbpp_test COMMAND wbpp_test)
         endif()
     endif()
 endif()

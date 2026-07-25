@@ -517,6 +517,30 @@ and PixInsight's per-user settings all belong to the desktop user). Plan:
 The staging root must be readable by both the `starbase` service account and the
 desktop user; a shared group on the staging root is the deployment answer.
 
+**Implemented (M8, v1).** The bridge is the `sb_pix` library plus three API
+surfaces, all validated against the live archive:
+
+- `POST /api/v1/actions` with `op=wbpp` stages the resolved set into a typed
+  tree, then renders the exact WBPP command from a preprocessing profile
+  (output directory, grouping keywords, FITS convention defaulting to top-down
+  to match the archive, plus verbatim `extra_params`). Both `automation` and
+  `loadOnly` modes; the rendered command and a self-contained `bash` launcher
+  are stored in `jobs.params_json`. The comma/equals split hazard is handled by
+  StarBase-controlled `dir=` names and a warning on any caller-supplied path
+  that would break parsing.
+- `GET /api/v1/jobs/{id}/launcher` returns the launcher as a downloadable
+  `text/x-shellscript`; this is the "run it from your own session" path that
+  sidesteps the daemon's lack of a display.
+- `GET /api/v1/queries/{id}/paths` (JSON or `format=text`) is the REST pull:
+  it resolves a saved query live and updates `last_run_at`/`last_count`. The
+  companion PJSR helper `pjsr/StarBaseWBPP.js` (our GPL code) fetches that list
+  from inside PixInsight and hands the frames to WBPP.
+
+Still an **open runtime item**: whether `--automation-mode --force-exit` runs
+truly headless on this Linux host or needs `xvfb-run` was not exercised here
+(no desktop session available to the build). The v1 launcher deliberately
+defers that question to the desktop user's session.
+
 ## 10. Action engine
 
 Jobs run on a worker pool; every job is an audited row with per-item results,

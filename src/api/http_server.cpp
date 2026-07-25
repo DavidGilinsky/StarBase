@@ -26,6 +26,7 @@
 #include "scanner.hpp"
 #include "starbase/version.hpp"
 #include "tls_cert.hpp"
+#include "wbpp.hpp"
 
 namespace starbase::api {
 namespace {
@@ -393,6 +394,49 @@ void HttpServer::Impl::routes() {
 
             if (op == "stage") {
                 send_json(res, job_json(starbase::action::stage(d, ac, frames)));
+            } else if (op == "wbpp") {
+                // Stage the set, then render a WBPP command-line handoff over the
+                // typed tree. starbased has no desktop session, so the payload is
+                // a command plus a launcher the user runs from their own session.
+                auto jr = starbase::action::stage(d, ac, frames);
+                std::vector<std::string> types;
+                for (const auto& f : frames) {
+                    const std::string t = f.image_type.empty() ? "unknown" : f.image_type;
+                    if (std::find(types.begin(), types.end(), t) == types.end())
+                        types.push_back(t);
+                }
+                starbase::pix::WbppProfile prof;
+                if (body.contains("profile") && body["profile"].is_object()) {
+                    const auto& pj = body["profile"];
+                    prof.output_dir = pj.value("output_dir", std::string());
+                    prof.keywords = pj.value("keywords", prof.keywords);
+                    prof.grouping_enabled = pj.value("grouping_enabled", prof.grouping_enabled);
+                    prof.fits_convention = pj.value("fits_convention", prof.fits_convention);
+                    prof.pixinsight_sh = pj.value("pixinsight_sh", prof.pixinsight_sh);
+                    prof.wbpp_script = pj.value("wbpp_script", prof.wbpp_script);
+                    if (pj.contains("extra_params") && pj["extra_params"].is_array())
+                        for (const auto& e : pj["extra_params"])
+                            prof.extra_params.push_back(e.get<std::string>());
+                }
+                if (prof.output_dir.empty()) prof.output_dir = jr.root + "/out";
+                const bool load_only = body.value("load_only", false);
+                auto plan = starbase::pix::render(jr.root, types, prof, load_only);
+
+                // Record the rendered command against the job for later download.
+                json pp = {{"mode", plan.mode}, {"output_dir", plan.output_dir},
+                           {"command", plan.command}, {"launcher", plan.launcher}};
+                d.exec("UPDATE jobs SET type='wbpp', params_json='" + d.escape(pp.dump()) +
+                       "' WHERE id=" + std::to_string(jr.job_id));
+
+                json out = job_json(jr);
+                out["type"] = "wbpp";
+                out["mode"] = plan.mode;
+                out["output_dir"] = plan.output_dir;
+                out["dirs"] = plan.dirs;
+                out["command"] = plan.command;
+                out["launcher"] = plan.launcher;
+                out["warnings"] = plan.warnings;
+                send_json(res, out);
             } else if (op == "export") {
                 const std::string fmt = body.value("format", "csv");
                 const std::string content = starbase::action::export_frames(d, frames, fmt);
@@ -442,6 +486,58 @@ void HttpServer::Impl::routes() {
             auto items = d.query("SELECT frame_id, action, src_path, dst_path, status, detail "
                                  "FROM job_items WHERE job_id = " + id + " ORDER BY id LIMIT 5000");
             j["items"] = rows_to_json(items, {"frame_id", "action", "src", "dst", "status", "detail"});
+            send_json(res, j);
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- GET /api/v1/jobs/:id/launcher  (download the WBPP launcher script) ----
+    server->Get(R"(/api/v1/jobs/(\d+)/launcher)",
+                [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto d = db();
+            const std::string id = d.escape(req.matches[1]);
+            auto r = d.query("SELECT params_json FROM jobs WHERE id = " + id +
+                             " AND type = 'wbpp'");
+            if (r.empty() || !r[0][0]) { send_error(res, 404, "no WBPP job with that id"); return; }
+            json pp = json::parse(*r[0][0]);
+            const std::string launcher = pp.value("launcher", "");
+            if (launcher.empty()) { send_error(res, 404, "job has no launcher"); return; }
+            res.set_header("Content-Disposition",
+                           "attachment; filename=\"starbase-wbpp-job-" + id + ".sh\"");
+            res.set_content(launcher, "text/x-shellscript");
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- GET /api/v1/queries/:id/paths  (REST pull for the PJSR helper) ----
+    // Resolves a saved query live and returns its frame paths, so a small
+    // StarBase-authored script inside PixInsight can fetch a set by id.
+    server->Get(R"(/api/v1/queries/(\d+)/paths)",
+                [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto d = db();
+            const std::string id = d.escape(req.matches[1]);
+            auto q = d.query("SELECT name, filter_json FROM saved_queries WHERE id = " + id);
+            if (q.empty()) { send_error(res, 404, "no such query"); return; }
+            const std::string name = q[0][0] ? *q[0][0] : "";
+            const std::string filter = q[0][1] ? *q[0][1] : "{}";
+            std::vector<starbase::action::FrameRef> frames;
+            try { frames = starbase::action::resolve_by_filter(d, filter); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            d.exec("UPDATE saved_queries SET last_run_at = UTC_TIMESTAMP(), last_count = " +
+                   std::to_string(frames.size()) + " WHERE id = " + id);
+            if (req.has_param("format") && req.get_param_value("format") == "text") {
+                std::string body;
+                for (const auto& f : frames) body += f.abs_path + "\n";
+                res.set_content(body, "text/plain");
+                return;
+            }
+            json j;
+            j["id"] = std::stoll(id);
+            j["name"] = name;
+            j["count"] = frames.size();
+            json paths = json::array();
+            for (const auto& f : frames) paths.push_back(f.abs_path);
+            j["paths"] = paths;
             send_json(res, j);
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
