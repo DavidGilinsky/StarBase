@@ -582,6 +582,24 @@ OpenSSL, same as NightWatcher2. Static SPA in `web/` (vanilla JS, no build
 step). Tabs: Dashboard, Browse/Query, Frame detail, Collections & Tags, Actions,
 Roots & Settings, Users, Database.
 
+**Implemented.** Dashboard (tiles + a targets rollup), Browse (a simple
+filter bar over `GET /frames`), and the Frame detail drawer (resolved fields,
+full header, plus the M6 calibration match and M9 sidecars loaded in place)
+landed in M4/M9. The **Query → Actions core** landed with the UI work: a visual
+filter-AST builder (AND/OR of conditions, cone search, a raw-JSON escape hatch
+for arbitrary ASTs), saved queries (save/load/delete, with a `paths` REST-pull
+link per query), and an **actions bar that operates on the current result set**
+— stage, WBPP handoff (loadOnly toggle, keywords, output dir, with the rendered
+command shown plus a launcher download), export (csv/json/paths), and the
+destructive filesystem ops behind a default-on dry-run. A **Jobs** view lists
+the ledger and drills into per-item results, offering the launcher download for
+WBPP jobs. Views are hash-routed (`#query`, `#jobs`, …) so they are
+bookmarkable; an optional API token is held in `localStorage` and sent as a
+bearer header for the write endpoints. Still unbuilt: Collections & Tags (no
+backend yet), a Roots & Settings editor (only `GET /roots` + `POST /scan`
+exist), Users (token-only today; PBKDF2 users from NightWatcher2 not ported),
+and a Database tab.
+
 Security posture, inherited from NightWatcher2 and tightened because this daemon
 mutates filesystems:
 

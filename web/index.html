@@ -2,11 +2,13 @@
 <!--
   Author:        David Gilinsky
   File:          web/index.html
-  Purpose:       StarBase web UI shell: dashboard, browse/query grid, and frame
-                 detail, as a static SPA against the /api/v1 API. No build step.
+  Purpose:       StarBase web UI shell: dashboard, browse, the query builder with
+                 saved queries and an actions bar (stage / WBPP / export / fsop),
+                 the jobs ledger, and the frame detail drawer. Static SPA against
+                 /api/v1, vanilla JS, no build step.
   Created:       2026-07-24
-  Last Modified: 2026-07-24
-  Version:       0.1.0
+  Last Modified: 2026-07-25
+  Version:       0.2.0
   License:       GPL-3.0-or-later
 -->
 <html lang="en">
@@ -22,7 +24,11 @@
     <nav>
       <button data-view="dashboard" class="active">Dashboard</button>
       <button data-view="browse">Browse</button>
+      <button data-view="query">Query</button>
+      <button data-view="jobs">Jobs</button>
     </nav>
+    <span class="spacer"></span>
+    <button id="tokenBtn" class="icon" title="Set API token">🔑</button>
     <span id="conn" class="conn"></span>
   </header>
   <main id="app"></main>
