@@ -129,10 +129,15 @@ if(SB_WITH_DB)
         target_compile_definitions(sb_httplib INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
         target_link_libraries(sb_httplib INTERFACE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 
+        # Filter-AST -> SQL query compiler (nlohmann/json in + the DB for escaping).
+        add_library(sb_query STATIC src/query/query.cpp)
+        target_include_directories(sb_query PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/query)
+        target_link_libraries(sb_query PUBLIC sb_db sb_httplib)
+
         # Embedded HTTP/JSON API and static web UI, with self-signed TLS.
         add_library(sb_api STATIC src/api/http_server.cpp src/api/tls_cert.cpp)
         target_include_directories(sb_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/api)
-        target_link_libraries(sb_api PUBLIC sb_scan sb_httplib OpenSSL::Crypto)
+        target_link_libraries(sb_api PUBLIC sb_scan sb_query sb_httplib OpenSSL::Crypto)
     endif()
 endif()
 
@@ -218,6 +223,10 @@ if(SB_BUILD_TESTS)
             add_executable(equipment_test tests/equipment_test.cpp)
             target_link_libraries(equipment_test PRIVATE sb_index)
             add_test(NAME equipment_test COMMAND equipment_test)
+
+            add_executable(query_test tests/query_test.cpp)
+            target_link_libraries(query_test PRIVATE sb_query)
+            add_test(NAME query_test COMMAND query_test)
         endif()
     endif()
 endif()

@@ -20,6 +20,7 @@
 
 #include "logging.hpp"
 #include "mapping_loader.hpp"
+#include "query.hpp"
 #include "scanner.hpp"
 #include "starbase/version.hpp"
 #include "tls_cert.hpp"
@@ -210,6 +211,97 @@ void HttpServer::Impl::routes() {
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
         }
+    });
+
+    // ---- POST /api/v1/query  (filter-AST search) ----
+    // Body: {"filter": <ast>, "sort": [...], "limit": N, "offset": M}
+    server->Post("/api/v1/query", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto d = db();
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            std::string where, order;
+            try {
+                where = starbase::query::compile_filter(body.value("filter", json()), d);
+                order = starbase::query::compile_sort(body.value("sort", json()));
+            } catch (const starbase::query::QueryError& qe) {
+                send_error(res, 400, qe.what());
+                return;
+            }
+            const long limit = std::max(1L, std::min(500L, body.value("limit", 50L)));
+            const long offset = std::max(0L, body.value("offset", 0L));
+
+            auto tr = d.query("SELECT COUNT(*) FROM v_frames WHERE " + where);
+            const long long total = (tr.empty() || !tr[0][0]) ? 0 : std::stoll(*tr[0][0]);
+
+            const std::vector<std::string> cols = {
+                "frame_id",   "abs_path",   "filename",  "image_type", "object",
+                "filter",     "session_night", "date_obs_utc", "exposure_s", "gain",
+                "rig",        "camera",     "site",      "sqm_mag_arcsec2"};
+            auto rows = d.query(
+                "SELECT frame_id, abs_path, filename, image_type, object, filter, "
+                "session_night, date_obs_utc, exposure_s, gain, rig, camera, site, "
+                "sqm_mag_arcsec2 FROM v_frames WHERE " + where + " ORDER BY " + order +
+                " LIMIT " + std::to_string(limit) + " OFFSET " + std::to_string(offset));
+
+            json j;
+            j["total"] = total;
+            j["limit"] = limit;
+            j["offset"] = offset;
+            j["where"] = where;  // echoed so a caller can see the compiled predicate
+            j["frames"] = rows_to_json(rows, cols);
+            send_json(res, j);
+        } catch (const json::exception& e) {
+            send_error(res, 400, std::string("invalid JSON body: ") + e.what());
+        } catch (const std::exception& e) {
+            send_error(res, 500, e.what());
+        }
+    });
+
+    // ---- Saved queries: list, get, save, delete ----
+    server->Get("/api/v1/queries", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto d = db();
+            auto rows = d.query(
+                "SELECT id, name, description, filter_json, sort_json, last_count, "
+                "DATE_FORMAT(last_run_at,'%Y-%m-%dT%H:%i:%sZ') FROM saved_queries ORDER BY name");
+            send_json(res, rows_to_json(rows, {"id", "name", "description", "filter_json",
+                                               "sort_json", "last_count", "last_run_at"}));
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Post("/api/v1/queries", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            json body = json::parse(req.body);
+            const std::string name = body.at("name").get<std::string>();
+            if (name.empty()) { send_error(res, 400, "name is required"); return; }
+            // Store the filter as-is; validate it compiles before saving.
+            const json filter = body.value("filter", json::object());
+            try { starbase::query::compile_filter(filter, d); }
+            catch (const starbase::query::QueryError& qe) { send_error(res, 400, qe.what()); return; }
+            const std::string sort = body.contains("sort") ? body["sort"].dump() : "";
+            const std::string desc = body.value("description", "");
+            d.exec("INSERT INTO saved_queries (name, description, filter_json, sort_json) VALUES ('" +
+                   d.escape(name) + "', " + (desc.empty() ? "NULL" : "'" + d.escape(desc) + "'") +
+                   ", '" + d.escape(filter.dump()) + "', " +
+                   (sort.empty() ? "NULL" : "'" + d.escape(sort) + "'") + ") "
+                   "ON DUPLICATE KEY UPDATE description=VALUES(description), "
+                   "filter_json=VALUES(filter_json), sort_json=VALUES(sort_json)");
+            send_json(res, json{{"saved", name}});
+        } catch (const json::exception& e) {
+            send_error(res, 400, std::string("invalid JSON: ") + e.what());
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/queries/(\d+))", [this](const httplib::Request& req,
+                                                      httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        try {
+            auto d = db();
+            d.exec("DELETE FROM saved_queries WHERE id = " + d.escape(req.matches[1]));
+            send_json(res, json{{"deleted", std::stoi(req.matches[1])}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
     // ---- GET /api/v1/summary  (dashboard aggregates) ----
