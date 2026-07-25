@@ -756,14 +756,63 @@ function pathBrowser(onPick, start) {
 
 // ---- Roots & Settings ------------------------------------------------------
 
-async function runScan(label, statusEl) {
-  statusEl.replaceChildren(el('span', { class: 'muted' }, label ? `scanning ${label}…` : 'scanning all roots…'));
+// ---- live scan progress (shared by Roots and Database) ---------------------
+
+let scanPoll = null;
+function stopScanPoll() { if (scanPoll) { clearInterval(scanPoll); scanPoll = null; } }
+
+const scanCount = (label, v, cls) =>
+  el('span', { class: 'scancount ' + (cls || '') }, el('b', {}, Number(v || 0).toLocaleString()), ' ' + label);
+
+function scanStatusView(s) {
+  if (!s.active && !s.finished) return el('div', { class: 'muted' }, 'No scan running.');
+  const parts = [];
+  if (s.active) {
+    parts.push(el('div', { class: 'row' },
+      el('span', { class: 'spinner' }),
+      el('b', {}, `Scanning ${fmt(s.root, '')}`),
+      s.total_roots > 1 ? el('span', { class: 'muted' }, `· root ${s.done_roots + 1} of ${s.total_roots}`) : null,
+      el('span', { class: 'muted' }, `· ${Math.round((s.elapsed_ms || 0) / 1000)}s`)));
+    parts.push(el('div', { class: 'scancounts' },
+      scanCount('seen', s.seen), scanCount('added', s.added), scanCount('updated', s.updated),
+      scanCount('unchanged', s.unchanged), scanCount('frames', s.frames), scanCount('sidecars', s.sidecars),
+      Number(s.error) ? scanCount('errors', s.error, 'warn') : null));
+  } else {
+    parts.push(el('div', { class: 'ok-msg' }, 'Scan complete.'));
+  }
+  if (s.results && s.results.length) {
+    parts.push(el('div', { class: 'wrap', style: 'margin-top:.5rem' }, el('table', {},
+      el('thead', {}, el('tr', {}, ...['Root', 'Added', 'Updated', 'Unchanged', 'Frames', 'Sidecars', 'ms'].map(h => el('th', {}, h)))),
+      el('tbody', {}, ...s.results.map(r => r.failed
+        ? el('tr', {}, el('td', {}, r.root), el('td', { class: 'err-msg', colspan: 6 }, r.failed))
+        : el('tr', {}, el('td', {}, r.root), el('td', { class: 'num' }, r.added), el('td', { class: 'num' }, r.updated),
+            el('td', { class: 'num' }, r.unchanged), el('td', { class: 'num' }, r.frames),
+            el('td', { class: 'num' }, r.sidecars), el('td', { class: 'num muted' }, r.ms)))))));
+  }
+  return el('div', {}, ...parts);
+}
+
+// Poll /scan/status into `host` until the scan is idle. onDone(status) optional.
+function watchScan(host, onDone) {
+  stopScanPoll();
+  const tick = async () => {
+    try {
+      const s = await api('/scan/status');
+      host.replaceChildren(scanStatusView(s));
+      if (!s.active) { stopScanPoll(); if (onDone) onDone(s); }
+    } catch (e) { host.replaceChildren(el('div', { class: 'err-msg' }, String(e.message || e))); stopScanPoll(); }
+  };
+  tick();
+  scanPoll = setInterval(tick, 1000);
+}
+
+// Start a scan (one root or all) and show its live progress in `host`.
+async function runScan(label, host) {
+  host.replaceChildren(el('span', { class: 'muted' }, 'starting…'));
   try {
-    const q = label ? '?root=' + encodeURIComponent(label) : '';
-    const results = await apiPost('/scan' + q, {});
-    const parts = results.map(x => `${x.root}: ${x.added} added, ${x.updated} updated, ${x.unchanged} same, ${x.frames} frames, ${x.sidecars} sidecars (${x.ms} ms)`);
-    statusEl.replaceChildren(el('span', { class: 'ok-msg' }, parts.join(' · ') || 'nothing to scan'));
-  } catch (e) { statusEl.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    await apiPost('/scan' + (label ? '?root=' + encodeURIComponent(label) : ''), {});
+    watchScan(host);
+  } catch (e) { host.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
 }
 
 function addRootForm() {
@@ -954,6 +1003,12 @@ async function database() {
     const tablesCard = el('div', { class: 'card' }, el('h3', {}, `Tables (${j.tables.length})`),
       el('div', { class: 'wrap' }, tbl));
 
+    const scanHost = el('div', { class: 'scanhost' });
+    const scanCard = el('div', { class: 'card' },
+      el('div', { class: 'row section' }, el('h3', {}, 'Scanning'),
+        el('button', { class: 'btn primary', onclick: () => runScan(null, scanHost) }, 'Scan all roots')),
+      scanHost);
+
     const mstatus = el('span', {});
     const maint = el('div', { class: 'card' }, el('h3', {}, 'Maintenance'),
       el('div', { class: 'row' },
@@ -962,16 +1017,12 @@ async function database() {
           try { const r = await apiPost('/db/seed', {}); mstatus.replaceChildren(el('span', { class: 'ok-msg' }, `re-seeded header mapping (${r.statements} statements)`)); }
           catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
         } }, 'Re-seed header mapping'),
-        el('button', { class: 'btn', onclick: async () => {
-          mstatus.replaceChildren(el('span', { class: 'muted' }, 'scanning all roots…'));
-          try { const r = await apiPost('/scan', {}); mstatus.replaceChildren(el('span', { class: 'ok-msg' }, r.map(x => `${x.root}: ${x.frames} frames`).join(' · ') || 'nothing to scan')); database(); }
-          catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
-        } }, 'Rescan all roots'),
         me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('targets') }, 'Review target names →') : null,
         mstatus),
-      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Rescanning re-indexes every enabled root. Target-name normalization canonicalizes OBJECT values (M101 → “M 101”).'));
+      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Target-name normalization canonicalizes OBJECT values (M101 → “M 101”). Scanning runs in the background; watch it above.'));
 
-    app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, tablesCard, maint);
+    app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, scanCard, tablesCard, maint);
+    watchScan(scanHost);  // reflect any scan already in progress (or show idle)
   } catch (e) { showError(e); }
 }
 
@@ -1179,6 +1230,7 @@ function go(view, preset) {
   if (location.hash.slice(1) !== view) history.replaceState(null, '', '#' + view);
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   drawer.classList.add('hidden');
+  stopScanPoll();  // a view still watching a scan re-establishes its own poll
   VIEWS[view](preset);
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.view));

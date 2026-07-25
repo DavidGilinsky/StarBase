@@ -14,6 +14,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,15 @@ struct ScanConfig {
     bool case_sensitive = true;
     // A running scan aborts promptly when this is set (SIGTERM during a sweep).
     std::atomic<bool>* stop = nullptr;
+    // Called ~every 300ms with the running totals, for a live progress view.
+    // Invoked from a reporter thread; keep it quick and thread-safe.
+    std::function<void(const struct ScanProgress&)> on_progress;
+};
+
+// Live progress snapshot delivered during a sweep (a subset of ScanStats).
+struct ScanProgress {
+    long files_seen = 0, files_added = 0, files_updated = 0, files_skipped = 0;
+    long files_settling = 0, files_error = 0, frames_written = 0, artifacts_recorded = 0;
 };
 
 struct ScanStats {

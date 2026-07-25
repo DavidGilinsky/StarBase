@@ -291,6 +291,24 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     pool.reserve(static_cast<size_t>(nthreads));
     for (int i = 0; i < nthreads; ++i) pool.emplace_back(worker);
 
+    // ---- live progress reporter: emit running totals ~every 300ms ----
+    auto emit = [&] {
+        if (cfg.on_progress)
+            cfg.on_progress(ScanProgress{seen.load(), added.load(), updated.load(), skipped.load(),
+                                         settling.load(), errored.load(), frames.load(), arts.load()});
+    };
+    std::atomic<bool> reporting{cfg.on_progress != nullptr};
+    std::thread reporter;
+    if (cfg.on_progress)
+        reporter = std::thread([&] {
+            while (reporting.load()) { emit(); std::this_thread::sleep_for(std::chrono::milliseconds(300)); }
+        });
+    auto stop_reporter = [&] {
+        reporting.store(false);
+        if (reporter.joinable()) reporter.join();
+        emit();  // one final snapshot with the completed totals
+    };
+
     // ---- producer: walk the tree, feed the queue ----
     std::error_code ec;
     stdfs::recursive_directory_iterator it(
@@ -298,6 +316,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     if (ec) {
         queue.close();
         for (auto& t : pool) t.join();
+        stop_reporter();
         throw std::runtime_error("cannot walk root '" + root.label + "' at " + root_path +
                                  ": " + ec.message());
     }
@@ -327,6 +346,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     }
     queue.close();
     for (auto& t : pool) t.join();
+    stop_reporter();
 
     // Link sidecars to frames now that every frame in this pass is committed.
     // Match a same-directory frame whose name shares the sidecar's stem

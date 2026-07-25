@@ -175,6 +175,15 @@ b.warn { color: var(--warn); }
 .curow .tagchip { min-width: 8rem; text-align: center; }
 optgroup { color: var(--dim); }
 
+/* scan progress */
+.spinner { width: 14px; height: 14px; border: 2px solid var(--edge); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.scancounts { display: flex; flex-wrap: wrap; gap: .3rem .8rem; margin-top: .5rem; }
+.scancount { color: var(--dim); font-size: .85rem; }
+.scancount b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.scancount.warn b { color: var(--warn); }
+.scanhost:empty { display: none; }
+
 /* directory picker modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 1rem; width: min(620px, 92vw); display: flex; flex-direction: column; gap: .5rem; box-shadow: 0 20px 60px rgba(0,0,0,.5); }

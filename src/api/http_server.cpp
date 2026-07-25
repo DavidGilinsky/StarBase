@@ -20,8 +20,10 @@
 #include <cctype>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -124,6 +126,23 @@ struct HttpServer::Impl {
     // route setup is identical either way.
     std::unique_ptr<httplib::Server> server;
     std::thread thread;
+
+    // Live scan progress. POST /scan runs in scan_thread and reports here (one
+    // scan at a time); GET /scan/status reads it. Guarded by scan_mtx.
+    struct ScanState {
+        bool active = false;
+        bool finished = false;               // a completed run still worth showing
+        std::string root;                    // root currently being scanned
+        int total_roots = 0, done_roots = 0;
+        long seen = 0, added = 0, updated = 0, skipped = 0, settling = 0, errored = 0,
+             frames = 0, sidecars = 0;       // live totals for the current root
+        std::chrono::steady_clock::time_point started;
+        json results = json::array();        // per-root final stats
+    };
+    std::mutex scan_mtx;
+    ScanState scan_state;
+    std::thread scan_thread;
+    std::atomic<bool> scan_cancel{false};
 
     explicit Impl(ApiConfig c) : cfg(std::move(c)) {}
 
@@ -812,42 +831,96 @@ void HttpServer::Impl::routes() {
         }
     });
 
-    // ---- POST /api/v1/scan  (write; token-gated) ----
+    // ---- POST /api/v1/scan  (start a background scan; write-gated) ----
+    // Returns immediately; progress is polled from GET /api/v1/scan/status.
     server->Post("/api/v1/scan", [this](const httplib::Request& req, httplib::Response& res) {
         if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
+        { std::lock_guard<std::mutex> lk(scan_mtx);
+          if (scan_state.active) { send_error(res, 409, "a scan is already running"); return; } }
+        // Resolve the roots and mapping up front (needs the DB) so the worker
+        // thread only touches the scanner.
+        std::vector<db::RootRow> roots;
+        starbase::extract::HeaderMapping mapping;
         try {
             auto d = db();
-            const auto mapping = starbase::index::load_mapping(d);
-            std::vector<db::RootRow> roots;
+            mapping = starbase::index::load_mapping(d);
             if (req.has_param("root")) {
                 auto r = d.find_root_by_label(req.get_param_value("root"));
                 if (!r) { send_error(res, 404, "no such root"); return; }
                 roots.push_back(*r);
             } else {
-                for (const auto& r : d.list_roots())
-                    if (r.enabled) roots.push_back(r);
+                for (const auto& r : d.list_roots()) if (r.enabled) roots.push_back(r);
             }
-            json results = json::array();
-            for (const auto& r : roots) {
-                starbase::scan::ScanConfig sc;
-                sc.settle_seconds = r.settle_seconds;
-                sc.case_sensitive = r.case_sensitive;
-                const auto st = starbase::scan::scan_root(cfg.db, r, mapping, {}, sc);
-                results.push_back({{"root", r.label},
-                                   {"seen", st.files_seen},
-                                   {"added", st.files_added},
-                                   {"updated", st.files_updated},
-                                   {"unchanged", st.files_skipped},
-                                   {"settling", st.files_settling},
-                                   {"error", st.files_error},
-                                   {"frames", st.frames_written},
-                                   {"sidecars", st.artifacts_recorded},
-                                   {"ms", st.duration_ms}});
-            }
-            send_json(res, results);
-        } catch (const std::exception& e) {
-            send_error(res, 500, e.what());
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); return; }
+        if (roots.empty()) { send_error(res, 400, "no enabled roots to scan"); return; }
+
+        {
+            std::lock_guard<std::mutex> lk(scan_mtx);
+            if (scan_thread.joinable()) scan_thread.join();  // reap a finished run
+            scan_state = ScanState{};
+            scan_state.active = true;
+            scan_state.total_roots = static_cast<int>(roots.size());
+            scan_state.started = std::chrono::steady_clock::now();
+            scan_cancel.store(false);
         }
+        auto dbc = cfg.db;
+        scan_thread = std::thread([this, roots, mapping, dbc]() mutable {
+            for (size_t i = 0; i < roots.size(); ++i) {
+                if (scan_cancel.load()) break;
+                { std::lock_guard<std::mutex> lk(scan_mtx);
+                  scan_state.root = roots[i].label; scan_state.done_roots = static_cast<int>(i);
+                  scan_state.seen = scan_state.added = scan_state.updated = scan_state.skipped =
+                      scan_state.settling = scan_state.errored = scan_state.frames = scan_state.sidecars = 0; }
+                starbase::scan::ScanConfig sc;
+                sc.settle_seconds = roots[i].settle_seconds;
+                sc.case_sensitive = roots[i].case_sensitive;
+                sc.stop = &scan_cancel;
+                sc.on_progress = [this](const starbase::scan::ScanProgress& p) {
+                    std::lock_guard<std::mutex> lk(scan_mtx);
+                    scan_state.seen = p.files_seen; scan_state.added = p.files_added;
+                    scan_state.updated = p.files_updated; scan_state.skipped = p.files_skipped;
+                    scan_state.settling = p.files_settling; scan_state.errored = p.files_error;
+                    scan_state.frames = p.frames_written; scan_state.sidecars = p.artifacts_recorded;
+                };
+                try {
+                    const auto st = starbase::scan::scan_root(dbc, roots[i], mapping, {}, sc);
+                    std::lock_guard<std::mutex> lk(scan_mtx);
+                    scan_state.results.push_back({{"root", roots[i].label}, {"added", st.files_added},
+                        {"updated", st.files_updated}, {"unchanged", st.files_skipped},
+                        {"frames", st.frames_written}, {"sidecars", st.artifacts_recorded},
+                        {"error", st.files_error}, {"ms", st.duration_ms}});
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lk(scan_mtx);
+                    scan_state.results.push_back({{"root", roots[i].label}, {"failed", std::string(e.what())}});
+                }
+            }
+            std::lock_guard<std::mutex> lk(scan_mtx);
+            scan_state.active = false; scan_state.finished = true; scan_state.root = "";
+            scan_state.done_roots = scan_state.total_roots;
+        });
+        send_json(res, json{{"started", true}, {"roots", static_cast<int>(roots.size())}}, 202);
+    });
+
+    // ---- GET /api/v1/scan/status  (live scan progress) ----
+    server->Get("/api/v1/scan/status", [this](const httplib::Request&, httplib::Response& res) {
+        std::lock_guard<std::mutex> lk(scan_mtx);
+        json j;
+        j["active"] = scan_state.active;
+        j["finished"] = scan_state.finished;
+        j["root"] = scan_state.root;
+        j["done_roots"] = scan_state.done_roots;
+        j["total_roots"] = scan_state.total_roots;
+        if (scan_state.active || scan_state.finished) {
+            j["seen"] = scan_state.seen; j["added"] = scan_state.added;
+            j["updated"] = scan_state.updated; j["unchanged"] = scan_state.skipped;
+            j["settling"] = scan_state.settling; j["error"] = scan_state.errored;
+            j["frames"] = scan_state.frames; j["sidecars"] = scan_state.sidecars;
+            j["results"] = scan_state.results;
+            if (scan_state.active)
+                j["elapsed_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - scan_state.started).count();
+        }
+        send_json(res, j);
     });
 
     // ---- Tags and collections ---------------------------------------------
@@ -1512,6 +1585,12 @@ void HttpServer::start() {
 }
 
 void HttpServer::stop() {
+    // Abort a running scan (scan_cancel is atomic; the scanner polls it) and
+    // reap its thread before tearing the server down.
+    if (impl_) {
+        impl_->scan_cancel.store(true);
+        if (impl_->scan_thread.joinable()) impl_->scan_thread.join();
+    }
     if (impl_ && impl_->server && impl_->server->is_running()) impl_->server->stop();
     if (impl_ && impl_->thread.joinable()) impl_->thread.join();
 }
