@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS rigs (
     focal_min_mm       DECIMAL(7,1) NOT NULL,
     focal_max_mm       DECIMAL(7,1) NOT NULL,
     pixel_scale_arcsec DECIMAL(6,3) NULL,       -- derived, stored for grouping
+    -- Current flat set for a fixed (sited) rig; the sticky set stays active
+    -- across nights until superseded. NULL for mobile (siteless) rigs, which
+    -- bind flats by session_night instead. No inline FK: flat_sets is defined
+    -- later, and the app nulls this on flat-set delete (avoids a cycle).
+    active_flat_set_id INT          NULL,
     status             ENUM('active','retired') NOT NULL DEFAULT 'active',
     notes              TEXT         NULL,
     created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -348,6 +353,9 @@ CREATE TABLE IF NOT EXISTS frames (
     camera_id          INT          NULL,
     site_id            INT          NULL,
     filter_id          INT          NULL,
+    -- The flat set this frame belongs to. Set on raw flats and master flats;
+    -- NULL on lights, whose flat set is resolved by the matcher, not stored.
+    flat_set_id        INT          NULL,
     -- ...and as written, so a bad alias is diagnosable without a rescan
     filter_raw         VARCHAR(32)  NULL,
     filter_defaulted   TINYINT(1)   NOT NULL DEFAULT 0,  -- CLEAR injected, not observed
@@ -444,6 +452,7 @@ CREATE TABLE IF NOT EXISTS frames (
     -- and, unlike RA, it does not wrap.
     KEY idx_frames_radec (dec_deg, ra_deg),
     KEY idx_frames_rig_night (rig_id, session_night),
+    KEY idx_frames_flat_set (flat_set_id),
     KEY idx_frames_exposure (exposure_s),
     KEY idx_frames_sqm (sqm_mag_arcsec2),
     KEY idx_frames_object (object_canonical),
@@ -602,6 +611,70 @@ CREATE TABLE IF NOT EXISTS calibration_rules (
     PRIMARY KEY (id),
     UNIQUE KEY uk_calib_rules_name (name),
     KEY idx_calib_rules_type (target_type, enabled, priority)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------------
+-- Flat sets
+--
+-- A flat set is one optical state's flats for a rig: a contiguous capture run
+-- (usually spanning filters), optionally integrated into master flats. It is
+-- how a specific group of flats, or a master, is bound to specific lights.
+--
+--   * A mobile rig (no site) re-flats every session, so its lights bind to the
+--     set with the same rig + session_night.
+--   * A fixed rig (with a site) shoots one set that stays active across nights
+--     until superseded (a disassembly/reassembly boundary): a light binds to
+--     the newest set on-or-before its night. rigs.active_flat_set_id names the
+--     current one; the derived window is captured_night .. next set's night.
+--   * An explicit pin (light_flat_pins) overrides both.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS flat_sets (
+    id                 INT          NOT NULL AUTO_INCREMENT,
+    rig_id             INT          NOT NULL,
+    label              VARCHAR(96)  NOT NULL,   -- datetime stamp or operator name
+    source             ENUM('inferred','header','manual') NOT NULL DEFAULT 'inferred',
+    captured_night     DATE         NULL,       -- session_night the set was shot (anchor)
+    captured_start_utc DATETIME(6)  NULL,
+    captured_end_utc   DATETIME(6)  NULL,
+    frame_count        INT          NOT NULL DEFAULT 0,   -- raw flats in the set (cached)
+    -- Optional explicit validity window (session_night range). NULL = derived:
+    -- active from captured_night until the next set for the rig.
+    valid_from         DATE         NULL,
+    valid_to           DATE         NULL,
+    notes              TEXT         NULL,
+    created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                    ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_flat_sets_rig_label (rig_id, label),
+    KEY idx_flat_sets_rig_night (rig_id, captured_night),
+    CONSTRAINT fk_flat_sets_rig FOREIGN KEY (rig_id)
+        REFERENCES rigs (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Explicit overrides: pin a specific flat set to a group of lights. A rig_night
+-- pin is the common case (this night's lights use that set); a saved_query pin
+-- covers an arbitrary selection.
+CREATE TABLE IF NOT EXISTS light_flat_pins (
+    id             INT          NOT NULL AUTO_INCREMENT,
+    flat_set_id    INT          NOT NULL,
+    scope          ENUM('rig_night','saved_query') NOT NULL,
+    rig_id         INT          NULL,       -- scope = rig_night
+    session_night  DATE         NULL,       -- scope = rig_night
+    saved_query_id INT          NULL,       -- scope = saved_query
+    notes          TEXT         NULL,
+    created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    -- NULLs compare distinct, so this constrains only rig_night pins.
+    UNIQUE KEY uk_pin_rig_night (rig_id, session_night),
+    KEY idx_pin_set (flat_set_id),
+    CONSTRAINT fk_pin_set FOREIGN KEY (flat_set_id)
+        REFERENCES flat_sets (id) ON DELETE CASCADE,
+    CONSTRAINT fk_pin_rig FOREIGN KEY (rig_id)
+        REFERENCES rigs (id) ON DELETE CASCADE,
+    CONSTRAINT fk_pin_query FOREIGN KEY (saved_query_id)
+        REFERENCES saved_queries (id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------------
@@ -784,6 +857,15 @@ CREATE TABLE IF NOT EXISTS object_names (
 
 -- The grid the UI browses: one row per frame with equipment names resolved and
 -- the absolute path assembled.
+-- ---------------------------------------------------------------------------
+-- Migrations for existing databases. schema.sql runs on every start; these are
+-- idempotent (ADD ... IF NOT EXISTS), so they are no-ops once applied and must
+-- precede any view that references the new columns.
+-- ---------------------------------------------------------------------------
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS flat_set_id INT NULL;
+ALTER TABLE frames ADD KEY IF NOT EXISTS idx_frames_flat_set (flat_set_id);
+ALTER TABLE rigs   ADD COLUMN IF NOT EXISTS active_flat_set_id INT NULL;
+
 CREATE OR REPLACE VIEW v_frames AS
 SELECT
     fr.id                      AS frame_id,
@@ -818,6 +900,8 @@ SELECT
     fr.set_temp_c,
     fr.airmass,
     fr.sqm_mag_arcsec2,
+    fr.flat_set_id,
+    fs.label                   AS flat_set,
     fr.focus_pos,
     fr.rotator_deg,
     fr.guide_rms_arcsec
@@ -827,7 +911,8 @@ JOIN roots   r   ON r.id  = f.root_id
 LEFT JOIN rigs      rg  ON rg.id  = fr.rig_id
 LEFT JOIN cameras   cam ON cam.id = fr.camera_id
 LEFT JOIN sites     st  ON st.id  = fr.site_id
-LEFT JOIN filters   fl  ON fl.id  = fr.filter_id;
+LEFT JOIN filters   fl  ON fl.id  = fr.filter_id
+LEFT JOIN flat_sets fs  ON fs.id  = fr.flat_set_id;
 
 -- What is on hand, by night and configuration. Drives the dashboard and answers
 -- "do I have flats for that session".

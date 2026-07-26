@@ -14,6 +14,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace starbase::names {
 
@@ -30,5 +31,12 @@ struct Canon {
 // recognize unchanged (never a hard failure). Placeholder values resolve with
 // placeholder=true and the name unchanged.
 Canon canonicalize(const std::string& raw);
+
+// All equivalent canonical designations for a raw name, in the CDS written form.
+// Cross-references the Messier catalog to its NGC/IC equivalents, so "M31",
+// "M 31", "NGC224", and "NGC 224" all yield {"M 31", "NGC 224"} and a search on
+// any of them finds the object. Always returns at least the canonical form; a
+// name with no cross-reference (or a non-catalog name) returns just that one.
+std::vector<std::string> designations(const std::string& raw);
 
 }  // namespace starbase::names

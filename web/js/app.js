@@ -1030,6 +1030,7 @@ async function database() {
 // ---- Equipment (admin): build rigs from camera + focal-length combos --------
 
 let siteDist = 250;  // metres; the user-adjustable site clustering distance
+let flatGap = 45;    // minutes; the gap that separates one flat run from the next
 
 async function equipment() {
   app.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
@@ -1037,6 +1038,8 @@ async function equipment() {
     const j = await api('/equipment');
     let sug = { clusters: [] };
     try { sug = await api('/equipment/site-suggestions?distance=' + siteDist); } catch (_e) { /* needs frames */ }
+    let fsug = { clusters: [] };
+    try { fsug = await api('/equipment/flat-set-suggestions?gap_minutes=' + flatGap); } catch (_e) { /* needs flats */ }
     const rnd = (v) => Math.round(Number(v));
     const parts = [el('h2', {}, 'Equipment')];
 
@@ -1068,19 +1071,38 @@ async function equipment() {
         el('div', { class: 'culist' }, ...rows), sstatus));
     }
 
-    // Existing rigs, editable.
+    // Existing rigs, editable: name, camera, telescope, site, focal range.
     const rrows = j.rigs.length ? j.rigs.map(r => {
-      const nm = el('input', { value: r.name, style: 'width:12em' });
-      const fmin = el('input', { type: 'number', value: rnd(r.focal_min_mm), style: 'width:6em' });
-      const fmax = el('input', { type: 'number', value: rnd(r.focal_max_mm), style: 'width:6em' });
+      const nm = el('input', { value: r.name, style: 'width:11em' });
+      const cam = el('select', {}, ...j.cameras.map(c =>
+        el('option', { value: c.id, selected: Number(c.id) === Number(r.camera_id) }, c.model)));
+      const tel = el('input', { value: r.telescope || '', placeholder: 'telescope', style: 'width:10em' });
+      const site = el('select', {}, el('option', { value: '' }, '(no site)'),
+        ...j.sites.map(x => el('option', { value: x.id, selected: Number(x.id) === Number(r.site_id) }, x.name)));
+      const fmin = el('input', { type: 'number', value: rnd(r.focal_min_mm), style: 'width:5.5em' });
+      const fmax = el('input', { type: 'number', value: rnd(r.focal_max_mm), style: 'width:5.5em' });
+      const curSite = r.site_id ? Number(r.site_id) : 0;
       return el('div', { class: 'rigrow' },
-        nm, el('span', { class: 'muted', style: 'min-width:9em' }, r.camera + (r.telescope ? ' · ' + r.telescope : '')),
+        nm, cam, tel, site,
         el('span', { class: 'muted' }, 'range'), fmin, el('span', { class: 'muted' }, '–'), fmax,
         el('span', { class: 'muted' }, `${Number(r.frames).toLocaleString()} frames`),
         el('button', { class: 'btn', onclick: async () => {
-          try { const x = await apiPatch('/equipment/rigs/' + r.id, { name: nm.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value) });
-                if (x.reassigned != null) alert(`Saved; ${Number(x.reassigned).toLocaleString()} frame(s) reassigned.`); equipment(); }
-          catch (e) { alert(String(e.message || e)); }
+          // Send only what changed, so frame membership is recomputed only when
+          // camera or focal range actually moves.
+          const patch = {};
+          if (nm.value.trim() !== r.name) patch.name = nm.value.trim();
+          if (Number(cam.value) !== Number(r.camera_id)) patch.camera_id = Number(cam.value);
+          if (tel.value.trim() !== (r.telescope || '')) patch.telescope = tel.value.trim();
+          const newSite = site.value ? Number(site.value) : 0;
+          if (newSite !== curSite) patch.site_id = newSite;
+          if (Number(fmin.value) !== rnd(r.focal_min_mm)) patch.focal_min_mm = Number(fmin.value);
+          if (Number(fmax.value) !== rnd(r.focal_max_mm)) patch.focal_max_mm = Number(fmax.value);
+          if (!Object.keys(patch).length) { alert('No changes.'); return; }
+          try {
+            const x = await apiPatch('/equipment/rigs/' + r.id, patch);
+            if (x.reassigned) alert(`Saved; ${Number(x.reassigned).toLocaleString()} frame(s) reassigned.`);
+            equipment();
+          } catch (e) { alert(String(e.message || e)); }
         } }, 'Save'),
         el('button', { class: 'link', onclick: () => go('query', { rig: r.name }) }, 'query →'),
         el('button', { class: 'btn ghost', title: 'delete rig', onclick: async () => {
@@ -1090,18 +1112,33 @@ async function equipment() {
     }) : [el('div', { class: 'muted' }, 'No rigs yet. Create them from the suggestions above.')];
     parts.push(el('div', { class: 'card' }, el('h3', {}, 'Rigs'), el('div', { class: 'culist' }, ...rrows)));
 
-    // Sites: existing + location-clustered suggestions.
+    // Sites: existing (editable) + location-clustered suggestions.
     const sstatus2 = el('div', {});
-    const srrows = j.sites.length ? j.sites.map(s => el('div', { class: 'rigrow' },
-      el('b', {}, s.name),
-      el('span', { class: 'muted' }, `${num(s.latitude, 5)}, ${num(s.longitude, 5)}${s.timezone ? ' · ' + s.timezone : ''}`),
-      el('span', { class: 'muted' }, `${Number(s.frames).toLocaleString()} frames`),
-      el('button', { class: 'link', onclick: () => go('query', { site: s.name }) }, 'query →'),
-      el('button', { class: 'btn ghost', title: 'delete site', onclick: async () => {
-        if (!confirm(`Delete site "${s.name}"? Frames keep their files; their site is cleared.`)) return;
-        try { await apiDelete('/equipment/sites/' + s.id); equipment(); } catch (e) { alert(String(e.message || e)); }
-      } }, '✕')))
-      : [el('div', { class: 'muted' }, 'No sites yet. Create them from the location clusters below.')];
+    const srrows = j.sites.length ? j.sites.map(s => {
+      const nm = el('input', { value: s.name, style: 'width:11em' });
+      const lat0 = num(s.latitude, 6), lon0 = num(s.longitude, 6);
+      const lat = el('input', { type: 'number', step: 'any', value: lat0, style: 'width:8em' });
+      const lon = el('input', { type: 'number', step: 'any', value: lon0, style: 'width:8em' });
+      const tz = el('input', { value: s.timezone || '', placeholder: 'timezone', style: 'width:11em' });
+      return el('div', { class: 'rigrow' },
+        nm, lat, lon, tz,
+        el('span', { class: 'muted' }, `${Number(s.frames).toLocaleString()} frames`),
+        el('button', { class: 'btn', onclick: async () => {
+          const patch = {};
+          if (nm.value.trim() !== s.name) patch.name = nm.value.trim();
+          if (lat.value !== lat0) patch.latitude = Number(lat.value);
+          if (lon.value !== lon0) patch.longitude = Number(lon.value);
+          if (tz.value.trim() !== (s.timezone || '')) patch.timezone = tz.value.trim();
+          if (!Object.keys(patch).length) { alert('No changes.'); return; }
+          try { await apiPatch('/equipment/sites/' + s.id, patch); equipment(); }
+          catch (e) { alert(String(e.message || e)); }
+        } }, 'Save'),
+        el('button', { class: 'link', onclick: () => go('query', { site: s.name }) }, 'query →'),
+        el('button', { class: 'btn ghost', title: 'delete site', onclick: async () => {
+          if (!confirm(`Delete site "${s.name}"? Frames keep their files; their site is cleared.`)) return;
+          try { await apiDelete('/equipment/sites/' + s.id); equipment(); } catch (e) { alert(String(e.message || e)); }
+        } }, '✕'));
+    }) : [el('div', { class: 'muted' }, 'No sites yet. Create them from the location clusters below.')];
 
     const distInput = el('input', { type: 'number', value: siteDist, style: 'width:7em' });
     const clusterRows = (sug.clusters || []).map(c => {
@@ -1123,7 +1160,9 @@ async function equipment() {
         } }, 'Create site'));
     });
 
-    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Sites'), el('div', { class: 'culist' }, ...srrows)));
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Sites'),
+      el('div', { class: 'muted', style: 'margin-bottom:.3rem' }, 'Edit corrects the label; changing coordinates does not re-cluster or re-assign frames.'),
+      el('div', { class: 'culist' }, ...srrows)));
     parts.push(el('div', { class: 'card' }, el('h3', {}, 'Location clusters'),
       el('div', { class: 'row' }, el('span', { class: 'muted' }, 'Group frames within'), distInput, el('span', { class: 'muted' }, 'metres of each other'),
         el('button', { class: 'btn', onclick: () => { siteDist = Math.max(1, Number(distInput.value) || 250); equipment(); } }, 'Re-cluster')),
@@ -1131,6 +1170,104 @@ async function equipment() {
       el('div', { class: 'culist' }, ...(clusterRows.length ? clusterRows : [el('div', { class: 'muted' }, 'No located frames (need OBSGEO/SITELAT headers, and a scan).')])), sstatus2));
 
     // Cameras (auto-detected, for context).
+    // Flat sets: bind a specific group of flats (or a master) to lights.
+    const fsStatus = el('div', {});
+    const fsRows = (j.flat_sets || []).length ? j.flat_sets.map(s => {
+      const isSite = truthy(s.is_site);
+      const isActive = truthy(s.is_active);
+      const label = el('input', { value: s.label, style: 'width:14em' });
+      const vf = el('input', { type: 'date', value: s.valid_from || '', title: 'valid from', style: 'width:9.5em' });
+      const vt = el('input', { type: 'date', value: s.valid_to || '', title: 'valid to', style: 'width:9.5em' });
+      const row = [
+        el('b', { style: 'min-width:9em' }, s.rig), label,
+        el('span', { class: 'muted' }, `${s.source} · ${s.captured_night || '—'} · ${Number(s.frames).toLocaleString()} flats`),
+      ];
+      if (isSite) {
+        // Fixed rig: sticky set, with an optional explicit validity window and
+        // an active pointer.
+        row.push(el('span', { class: 'muted' }, 'valid'), vf, el('span', { class: 'muted' }, '→'), vt);
+        row.push(isActive ? el('span', { class: 'tagchip' }, '★ active')
+          : el('button', { class: 'btn', onclick: async () => {
+              try { await apiPatch('/equipment/rigs/' + s.rig_id, { active_flat_set_id: Number(s.id) }); equipment(); }
+              catch (e) { alert(String(e.message || e)); } } }, 'Make active'));
+      } else {
+        row.push(el('span', { class: 'muted' }, 'night-matched (mobile rig)'));
+      }
+      row.push(el('button', { class: 'btn', onclick: async () => {
+        const patch = {};
+        if (label.value.trim() !== s.label) patch.label = label.value.trim();
+        if (isSite) {
+          if ((vf.value || '') !== (s.valid_from || '')) patch.valid_from = vf.value || null;
+          if ((vt.value || '') !== (s.valid_to || '')) patch.valid_to = vt.value || null;
+        }
+        if (!Object.keys(patch).length) { alert('No changes.'); return; }
+        try { await apiPatch('/equipment/flat-sets/' + s.id, patch); equipment(); }
+        catch (e) { alert(String(e.message || e)); }
+      } }, 'Save'));
+      row.push(el('button', { class: 'btn ghost', title: 'delete flat set', onclick: async () => {
+        if (!confirm(`Delete flat set "${s.label}"? Its flats keep their files; only the flat-set assignment is cleared.`)) return;
+        try { await apiDelete('/equipment/flat-sets/' + s.id); equipment(); } catch (e) { alert(String(e.message || e)); }
+      } }, '✕'));
+      return el('div', { class: 'rigrow' }, ...row);
+    }) : [el('div', { class: 'muted' }, 'No flat sets yet. Create them from the detected clusters below.')];
+
+    // Explicit pins (rig + night -> set), which override the rules.
+    const pinRows = (j.flat_pins || []).filter(p => p.scope === 'rig_night').map(p =>
+      el('div', { class: 'rigrow' },
+        el('span', { style: 'min-width:16em' }, `${p.rig || ('rig ' + p.rig_id)} · ${p.session_night}`),
+        el('span', { class: 'muted' }, '→ ' + p.flat_set),
+        el('button', { class: 'btn ghost', title: 'remove pin', onclick: async () => {
+          try { await apiDelete('/equipment/flat-pins/' + p.id); equipment(); } catch (e) { alert(String(e.message || e)); }
+        } }, '✕')));
+    const pinSet = el('select', {}, el('option', { value: '' }, '(flat set)'),
+      ...(j.flat_sets || []).map(s => el('option', { value: s.id }, `${s.rig} · ${s.label}`)));
+    const pinRig = el('select', {}, el('option', { value: '' }, '(rig)'),
+      ...j.rigs.map(r => el('option', { value: r.id }, r.name)));
+    const pinNight = el('input', { type: 'date', style: 'width:10em' });
+    const pinAdd = el('button', { class: 'btn', onclick: async () => {
+      if (!pinSet.value || !pinRig.value || !pinNight.value) { alert('Pick a set, a rig, and a night.'); return; }
+      try { await apiPost('/equipment/flat-pins', { flat_set_id: Number(pinSet.value), scope: 'rig_night', rig_id: Number(pinRig.value), session_night: pinNight.value }); equipment(); }
+      catch (e) { alert(String(e.message || e)); }
+    } }, 'Pin');
+
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Flat sets'),
+      el('div', { class: 'muted', style: 'margin-bottom:.3rem' }, 'Bind a specific group of flats (or a master) to lights. Mobile rigs (no site) match flats by night; fixed rigs (with a site) keep an active set until you shoot a new one. Pins override both.'),
+      el('div', { class: 'culist' }, ...fsRows),
+      el('h4', { style: 'margin:.6rem 0 .2rem' }, 'Pins (rig + night → set)'),
+      el('div', { class: 'culist' }, ...(pinRows.length ? pinRows : [el('div', { class: 'muted' }, 'No pins.')])),
+      el('div', { class: 'row', style: 'margin-top:.3rem' }, pinSet, pinRig, pinNight, pinAdd),
+      fsStatus));
+
+    // Detect flat sets: cluster not-yet-assigned flats by DATE-OBS gap.
+    const fsugStatus = el('div', {});
+    const gapInput = el('input', { type: 'number', value: flatGap, style: 'width:6em' });
+    const clRows = (fsug.clusters || []).map(c => {
+      const rigObj = j.rigs.find(r => Number(r.id) === Number(c.rig_id));
+      const isSite = !!(rigObj && rigObj.site_id);
+      const nm = el('input', { value: `${c.rig}-${(c.session_night || c.start_utc || '').slice(0, 10)}`, style: 'width:16em' });
+      const active = el('input', { type: 'checkbox' });
+      const row = [
+        el('span', { class: 'muted', style: 'min-width:22em' },
+          `${c.rig} · ${(c.start_utc || '').slice(0, 16)} → ${(c.end_utc || '').slice(11, 16)} · ${Number(c.frames).toLocaleString()} flats · ${(c.filters || []).join(', ')}`),
+        nm,
+      ];
+      if (isSite) row.push(el('label', { class: 'muted' }, active, ' active'));
+      row.push(el('button', { class: 'btn primary', onclick: async () => {
+        if (!nm.value.trim()) { fsugStatus.replaceChildren(el('span', { class: 'err-msg' }, 'name required')); return; }
+        try {
+          const r = await apiPost('/equipment/flat-sets', { rig_id: Number(c.rig_id), label: nm.value.trim(), start_utc: c.start_utc, end_utc: c.end_utc, set_active: isSite ? active.checked : false });
+          fsugStatus.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.label}; assigned ${Number(r.assigned).toLocaleString()} flat(s)`));
+          equipment();
+        } catch (e) { fsugStatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+      } }, 'Create set'));
+      return el('div', { class: 'rigrow' }, ...row);
+    });
+    parts.push(el('div', { class: 'card' }, el('h3', {}, 'Detect flat sets'),
+      el('div', { class: 'row' }, el('span', { class: 'muted' }, 'Group flats within'), gapInput, el('span', { class: 'muted' }, 'minutes of each other'),
+        el('button', { class: 'btn', onclick: () => { flatGap = Math.max(1, Number(gapInput.value) || 45); equipment(); } }, 'Re-scan')),
+      el('div', { class: 'muted', style: 'margin:.3rem 0' }, 'Contiguous runs of not-yet-assigned flats, per rig. Name one to create a flat set and assign its flats.'),
+      el('div', { class: 'culist' }, ...(clRows.length ? clRows : [el('div', { class: 'muted' }, 'No unassigned flats (need scanned flats with a rig and DATE-OBS).')])), fsugStatus));
+
     parts.push(el('div', { class: 'card' }, el('h3', {}, 'Cameras (auto-detected on scan)'),
       el('div', { class: 'chips' }, ...(j.cameras.length
         ? j.cameras.map(c => el('span', { class: 'tagchip' }, `${c.model} · ${Number(c.frames).toLocaleString()}`))
@@ -1357,7 +1494,7 @@ let me = null;  // { username, role } when logged in
 function chrome(on) {
   document.querySelector('nav').style.visibility = on ? 'visible' : 'hidden';
   const admin = on && me && me.role === 'admin';
-  document.querySelectorAll('nav button[data-view="users"], nav button[data-view="server"]')
+  document.querySelectorAll('nav button[data-view="equipment"], nav button[data-view="users"], nav button[data-view="server"]')
     .forEach(b => { b.style.display = admin ? '' : 'none'; });
   const acc = document.getElementById('account');
   if (!on || !me) { acc.replaceChildren(); return; }

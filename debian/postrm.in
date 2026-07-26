@@ -3,6 +3,16 @@
 # remove /etc/starbase (config + secrets) and the service user. The 'starbase'
 # database is never dropped automatically.
 set -e
+
+# Source debconf first, at the top: sourcing it may re-exec this script under
+# the debconf frontend, so it must happen before any side effect. Once sourced,
+# stdout (fd 1) is the debconf protocol pipe, so all human-readable output below
+# goes to stderr; writing it to stdout would corrupt the protocol (and abort the
+# purge with a non-zero status).
+if [ -f /usr/share/debconf/confmodule ]; then
+  . /usr/share/debconf/confmodule
+fi
+
 SYMLINK_BINDIR="@SB_SYMLINK_BINDIR@"
 case "$1" in
   remove|purge)
@@ -14,11 +24,10 @@ esac
 if [ "$1" = purge ]; then
   rm -rf /etc/starbase
   deluser --system starbase >/dev/null 2>&1 || userdel starbase >/dev/null 2>&1 || true
-  echo "starbase: /etc/starbase removed. The 'starbase' database was left intact;"
-  echo "starbase: drop it yourself with: sudo mariadb -e \"DROP DATABASE starbase\""
-  if [ -f /usr/share/debconf/confmodule ]; then
-    . /usr/share/debconf/confmodule
-    db_purge
-  fi
+  echo "starbase: /etc/starbase removed. The 'starbase' database was left intact;" >&2
+  echo "starbase: drop it yourself with: sudo mariadb -e \"DROP DATABASE starbase\"" >&2
+  # db_purge clears this package's stored debconf answers; never let it fail the
+  # purge (it is defined only when confmodule was sourced above).
+  if command -v db_purge >/dev/null 2>&1; then db_purge || true; fi
 fi
 exit 0

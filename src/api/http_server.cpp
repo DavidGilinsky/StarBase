@@ -314,8 +314,11 @@ void HttpServer::Impl::routes() {
                 send_error(res, 404, "no such facet"); return;
             }
             auto d = db();
-            auto rows = d.query("SELECT DISTINCT `" + field + "` FROM v_frames WHERE `" + field +
-                                "` IS NOT NULL AND `" + field + "` <> '' ORDER BY `" + field + "`");
+            // The object facet lists canonical designations (deduped M/NGC), so a
+            // pick maps straight onto the catalog-aware object search.
+            const std::string col = (field == "object") ? "object_canonical" : field;
+            auto rows = d.query("SELECT DISTINCT `" + col + "` FROM v_frames WHERE `" + col +
+                                "` IS NOT NULL AND `" + col + "` <> '' ORDER BY `" + col + "`");
             json arr = json::array();
             for (const auto& r : rows) if (r[0]) arr.push_back(*r[0]);
             send_json(res, arr);
@@ -438,7 +441,15 @@ void HttpServer::Impl::routes() {
                     where += " AND " + std::string(col) + " = '" +
                              d.escape(req.get_param_value(param)) + "'";
             };
-            add_eq("object", "object");
+            // Object search is catalog-aware: a value is expanded to all its
+            // equivalent designations (M31 / M 31 / NGC 224 all match), and the
+            // match is against object_canonical, which is spacing-normalized.
+            if (req.has_param("object")) {
+                std::string in;
+                for (const auto& x : starbase::names::designations(req.get_param_value("object")))
+                    in += (in.empty() ? "" : ", ") + std::string("'") + d.escape(x) + "'";
+                where += " AND object_canonical IN (" + in + ")";
+            }
             add_eq("image_type", "image_type");
             add_eq("filter", "filter");
             add_eq("night", "session_night");
@@ -1463,12 +1474,27 @@ void HttpServer::Impl::routes() {
             auto trows = d.query("SELECT id, name FROM telescopes ORDER BY name");
             auto rrows = d.query(
                 "SELECT r.id, r.name, r.camera_id, c.model, t.name, r.focal_min_mm, r.focal_max_mm, "
-                "(SELECT COUNT(*) FROM frames f WHERE f.rig_id = r.id), r.site_id, s.name FROM rigs r "
+                "(SELECT COUNT(*) FROM frames f WHERE f.rig_id = r.id), r.site_id, s.name, "
+                "r.active_flat_set_id, afs.label FROM rigs r "
                 "JOIN cameras c ON c.id = r.camera_id LEFT JOIN telescopes t ON t.id = r.telescope_id "
-                "LEFT JOIN sites s ON s.id = r.site_id ORDER BY r.name");
+                "LEFT JOIN sites s ON s.id = r.site_id "
+                "LEFT JOIN flat_sets afs ON afs.id = r.active_flat_set_id ORDER BY r.name");
             auto siterows = d.query(
                 "SELECT s.id, s.name, s.latitude, s.longitude, s.elevation_m, s.timezone, "
                 "(SELECT COUNT(*) FROM frames f WHERE f.site_id = s.id) FROM sites s ORDER BY s.name");
+            // Flat sets: which flats belong together, per rig, and which one is
+            // active. is_site marks fixed rigs (sticky set) vs mobile (per-night).
+            auto fsrows = d.query(
+                "SELECT fs.id, fs.rig_id, r.name, fs.label, fs.source, fs.captured_night, "
+                "fs.valid_from, fs.valid_to, "
+                "(SELECT COUNT(*) FROM frames f WHERE f.flat_set_id = fs.id), "
+                "(r.active_flat_set_id = fs.id), (r.site_id IS NOT NULL) FROM flat_sets fs "
+                "JOIN rigs r ON r.id = fs.rig_id ORDER BY r.name, fs.captured_night, fs.label");
+            auto pinrows = d.query(
+                "SELECT p.id, p.flat_set_id, fs.label, p.scope, p.rig_id, r.name, p.session_night, "
+                "p.saved_query_id, q.name FROM light_flat_pins p JOIN flat_sets fs ON fs.id = p.flat_set_id "
+                "LEFT JOIN rigs r ON r.id = p.rig_id LEFT JOIN saved_queries q ON q.id = p.saved_query_id "
+                "ORDER BY p.id");
             // Existing rig ranges, to skip already-covered clusters.
             struct Range { long long cam; double lo, hi; };
             std::vector<Range> covered;
@@ -1509,9 +1535,16 @@ void HttpServer::Impl::routes() {
                 {"cameras", rows_to_json(camrows, {"id", "model", "frames"})},
                 {"telescopes", rows_to_json(trows, {"id", "name"})},
                 {"rigs", rows_to_json(rrows, {"id", "name", "camera_id", "camera", "telescope",
-                                              "focal_min_mm", "focal_max_mm", "frames", "site_id", "site"})},
+                                              "focal_min_mm", "focal_max_mm", "frames", "site_id", "site",
+                                              "active_flat_set_id", "active_flat_set"})},
                 {"sites", rows_to_json(siterows, {"id", "name", "latitude", "longitude",
                                                   "elevation_m", "timezone", "frames"})},
+                {"flat_sets", rows_to_json(fsrows, {"id", "rig_id", "rig", "label", "source",
+                                                    "captured_night", "valid_from", "valid_to",
+                                                    "frames", "is_active", "is_site"})},
+                {"flat_pins", rows_to_json(pinrows, {"id", "flat_set_id", "flat_set", "scope",
+                                                     "rig_id", "rig", "session_night",
+                                                     "saved_query_id", "saved_query"})},
                 {"suggestions", suggestions}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
@@ -1558,27 +1591,70 @@ void HttpServer::Impl::routes() {
             const std::string id = std::string(req.matches[1]);
             json body = json::parse(req.body);
             auto d = db();
-            auto cur = d.query("SELECT camera_id, focal_min_mm, focal_max_mm FROM rigs WHERE id = " + id);
+            auto cur = d.query("SELECT camera_id, focal_min_mm, focal_max_mm, site_id FROM rigs WHERE id = " + id);
             if (cur.empty()) { send_error(res, 404, "no such rig"); return; }
             std::vector<std::string> sets;
             if (body.contains("name")) sets.push_back("name = '" + d.escape(body["name"].get<std::string>()) + "'");
-            bool range_changed = false;
+            // Camera and focal range both drive frame membership; a change to
+            // either recomputes which frames the rig owns.
+            long long cam = cur[0][0] ? std::stoll(*cur[0][0]) : 0;
+            bool membership_changed = false;
+            if (body.contains("camera_id") && body["camera_id"].get<long long>() > 0) {
+                cam = body["camera_id"].get<long long>();
+                sets.push_back("camera_id = " + std::to_string(cam));
+                membership_changed = true;
+            }
             double fmin = cur[0][1] ? std::stod(*cur[0][1]) : 0, fmax = cur[0][2] ? std::stod(*cur[0][2]) : 0;
-            if (body.contains("focal_min_mm")) { fmin = body["focal_min_mm"].get<double>(); sets.push_back("focal_min_mm = " + std::to_string(fmin)); range_changed = true; }
-            if (body.contains("focal_max_mm")) { fmax = body["focal_max_mm"].get<double>(); sets.push_back("focal_max_mm = " + std::to_string(fmax)); range_changed = true; }
+            if (body.contains("focal_min_mm")) { fmin = body["focal_min_mm"].get<double>(); sets.push_back("focal_min_mm = " + std::to_string(fmin)); membership_changed = true; }
+            if (body.contains("focal_max_mm")) { fmax = body["focal_max_mm"].get<double>(); sets.push_back("focal_max_mm = " + std::to_string(fmax)); membership_changed = true; }
             if (fmax < fmin) { send_error(res, 400, "focal range is invalid"); return; }
+            // Telescope: a name (created if new), or empty to clear it.
+            if (body.contains("telescope") && body["telescope"].is_string()) {
+                const std::string tn = body["telescope"].get<std::string>();
+                if (tn.empty()) sets.push_back("telescope_id = NULL");
+                else {
+                    d.exec("INSERT IGNORE INTO telescopes (name) VALUES ('" + d.escape(tn) + "')");
+                    auto tr = d.query("SELECT id FROM telescopes WHERE name = '" + d.escape(tn) + "'");
+                    if (!tr.empty() && tr[0][0]) sets.push_back("telescope_id = " + *tr[0][0]);
+                }
+            }
+            // Site: 0 clears it, >0 sets it (and re-stamps the rig's frames below).
+            long long rig_site = cur[0][3] ? std::stoll(*cur[0][3]) : 0;
+            bool site_provided = false;
+            if (body.contains("site_id")) {
+                rig_site = body["site_id"].get<long long>();
+                site_provided = true;
+                sets.push_back(rig_site > 0 ? "site_id = " + std::to_string(rig_site) : "site_id = NULL");
+            }
+            // Active (sticky) flat set for a fixed rig: 0 clears; >0 must belong
+            // to this rig.
+            if (body.contains("active_flat_set_id")) {
+                const long long afs = body["active_flat_set_id"].get<long long>();
+                if (afs > 0) {
+                    auto chk = d.query("SELECT id FROM flat_sets WHERE id = " + std::to_string(afs) +
+                                       " AND rig_id = " + id);
+                    if (chk.empty()) { send_error(res, 400, "flat set does not belong to this rig"); return; }
+                    sets.push_back("active_flat_set_id = " + std::to_string(afs));
+                } else {
+                    sets.push_back("active_flat_set_id = NULL");
+                }
+            }
             if (sets.empty()) { send_error(res, 400, "nothing to update"); return; }
             std::string sql = "UPDATE rigs SET ";
             for (size_t i = 0; i < sets.size(); ++i) sql += (i ? ", " : "") + sets[i];
-            d.exec(sql + " WHERE id = " + id);
+            try { d.exec(sql + " WHERE id = " + id); }
+            catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
             long long reassigned = 0;
-            if (range_changed && cur[0][0]) {
-                const std::string cam = *cur[0][0];
+            if (membership_changed && cam > 0) {
                 d.exec("UPDATE frames SET rig_id = NULL WHERE rig_id = " + id);  // drop old membership
-                d.exec("UPDATE frames SET rig_id = " + id + " WHERE camera_id = " + cam +
+                d.exec("UPDATE frames SET rig_id = " + id + " WHERE camera_id = " + std::to_string(cam) +
                        " AND focal_len_mm BETWEEN " + std::to_string(fmin) + " AND " + std::to_string(fmax));
                 reassigned = d.affected_rows();
             }
+            // Stamp the rig's site onto its frames when the rig carries one and
+            // either its membership or its site just changed.
+            if (rig_site > 0 && (membership_changed || site_provided))
+                d.exec("UPDATE frames SET site_id = " + std::to_string(rig_site) + " WHERE rig_id = " + id);
             send_json(res, json{{"updated", std::stoi(id)}, {"reassigned", reassigned}});
         } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
@@ -1671,6 +1747,43 @@ void HttpServer::Impl::routes() {
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
+    // Edit a site's attributes. This corrects the label (name, coordinates,
+    // timezone, elevation); it does not re-cluster or re-assign frames, so a
+    // frame keeps its site until you delete the site or rescan.
+    server->Patch(R"(/api/v1/equipment/sites/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            const std::string id = std::string(req.matches[1]);
+            json body = json::parse(req.body);
+            auto d = db();
+            auto cur = d.query("SELECT id FROM sites WHERE id = " + id);
+            if (cur.empty()) { send_error(res, 404, "no such site"); return; }
+            std::vector<std::string> sets;
+            if (body.contains("name")) {
+                const std::string nm = body["name"].get<std::string>();
+                if (nm.empty()) { send_error(res, 400, "name cannot be empty"); return; }
+                sets.push_back("name = '" + d.escape(nm) + "'");
+            }
+            if (body.contains("latitude"))  sets.push_back("latitude = " + std::to_string(body["latitude"].get<double>()));
+            if (body.contains("longitude")) sets.push_back("longitude = " + std::to_string(body["longitude"].get<double>()));
+            if (body.contains("elevation_m")) {
+                if (body["elevation_m"].is_null()) sets.push_back("elevation_m = NULL");
+                else sets.push_back("elevation_m = " + std::to_string(body["elevation_m"].get<double>()));
+            }
+            if (body.contains("timezone") && body["timezone"].is_string()) {
+                const std::string tz = body["timezone"].get<std::string>();
+                sets.push_back(tz.empty() ? "timezone = NULL" : "timezone = '" + d.escape(tz) + "'");
+            }
+            if (sets.empty()) { send_error(res, 400, "nothing to update"); return; }
+            std::string sql = "UPDATE sites SET ";
+            for (size_t i = 0; i < sets.size(); ++i) sql += (i ? ", " : "") + sets[i];
+            try { d.exec(sql + " WHERE id = " + id); }
+            catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
+            send_json(res, json{{"updated", std::stoi(id)}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     server->Delete(R"(/api/v1/equipment/sites/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
         if (!require_admin(req, res)) return;
         try {
@@ -1680,6 +1793,183 @@ void HttpServer::Impl::routes() {
             const long long freed = d.affected_rows();
             d.exec("DELETE FROM sites WHERE id = " + id);
             send_json(res, json{{"deleted", std::stoi(id)}, {"freed", freed}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // ---- Flat sets: bind a specific group of flats to lights ----------------
+    // Suggestions: contiguous runs of not-yet-assigned flats per rig, clustered
+    // by DATE-OBS gap. This is the flat analogue of the location-cluster builder.
+    server->Get("/api/v1/equipment/flat-set-suggestions", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const long long gap_s = qint(req, "gap_minutes", 45, 1, 100000) * 60LL;
+            auto rows = d.query(
+                "SELECT f.rig_id, r.name, f.date_obs_utc, f.session_night, "
+                "COALESCE(fl.name, f.filter_raw), UNIX_TIMESTAMP(f.date_obs_utc) "
+                "FROM frames f JOIN rigs r ON r.id = f.rig_id "
+                "LEFT JOIN filters fl ON fl.id = f.filter_id "
+                "WHERE f.image_type = 'flat' AND f.flat_set_id IS NULL AND f.rig_id IS NOT NULL "
+                "AND f.date_obs_utc IS NOT NULL ORDER BY f.rig_id, f.date_obs_utc");
+            json out = json::array();
+            json cur;
+            long long cur_rig = -1, last_epoch = 0;
+            auto flush = [&]() { if (!cur.is_null()) { out.push_back(cur); cur = json(); } };
+            for (const auto& r : rows) {
+                if (!r[0] || !r[2] || !r[5]) continue;
+                const long long rig = std::stoll(*r[0]);
+                const long long epoch = std::stoll(*r[5]);
+                const std::string filt = r[4] ? *r[4] : "";
+                if (cur.is_null() || rig != cur_rig || (epoch - last_epoch) > gap_s) {
+                    flush();
+                    cur = {{"rig_id", rig}, {"rig", r[1] ? *r[1] : ""},
+                           {"start_utc", *r[2]}, {"end_utc", *r[2]},
+                           {"session_night", r[3] ? json(*r[3]) : json(nullptr)},
+                           {"frames", 0}, {"filters", json::array()}};
+                    cur_rig = rig;
+                }
+                cur["end_utc"] = *r[2];
+                cur["frames"] = cur["frames"].get<long long>() + 1;
+                if (!filt.empty()) {
+                    auto& fa = cur["filters"];
+                    if (std::find(fa.begin(), fa.end(), filt) == fa.end()) fa.push_back(filt);
+                }
+                last_epoch = epoch;
+            }
+            flush();
+            send_json(res, json{{"gap_minutes", gap_s / 60}, {"clusters", out}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // Create a flat set from a rig + time window; assigns the flats (and any
+    // master flats) captured in that window, and optionally makes it active.
+    server->Post("/api/v1/equipment/flat-sets", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            const long long rig = body.value("rig_id", 0LL);
+            const std::string label = body.value("label", "");
+            const std::string start = body.value("start_utc", "");
+            const std::string end = body.value("end_utc", "");
+            if (rig <= 0 || label.empty() || start.empty() || end.empty()) {
+                send_error(res, 400, "rig_id, label, start_utc and end_utc are required"); return;
+            }
+            auto d = db();
+            std::string cols = "rig_id, label, source, captured_start_utc, captured_end_utc";
+            std::string vals = std::to_string(rig) + ", '" + d.escape(label) + "', '" +
+                d.escape(body.value("source", std::string("inferred"))) + "', '" +
+                d.escape(start) + "', '" + d.escape(end) + "'";
+            for (const char* k : {"valid_from", "valid_to"})
+                if (body.contains(k) && body[k].is_string() && !body[k].get<std::string>().empty()) {
+                    cols += std::string(", ") + k; vals += ", '" + d.escape(body[k].get<std::string>()) + "'";
+                }
+            long long set_id;
+            try { set_id = d.exec("INSERT INTO flat_sets (" + cols + ") VALUES (" + vals + ")"); }
+            catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
+            // Assign the rig's raw flats and master flats captured in the window
+            // that are not already claimed by another set.
+            d.exec("UPDATE frames SET flat_set_id = " + std::to_string(set_id) +
+                   " WHERE rig_id = " + std::to_string(rig) + " AND flat_set_id IS NULL "
+                   "AND (image_type = 'flat' OR (image_type = 'master' AND master_of = 'flat')) "
+                   "AND date_obs_utc BETWEEN '" + d.escape(start) + "' AND '" + d.escape(end) + "'");
+            const long long assigned = d.affected_rows();
+            d.exec("UPDATE flat_sets SET frame_count = " + std::to_string(assigned) +
+                   ", captured_night = (SELECT MIN(session_night) FROM frames WHERE flat_set_id = " +
+                   std::to_string(set_id) + ") WHERE id = " + std::to_string(set_id));
+            if (body.value("set_active", false))
+                d.exec("UPDATE rigs SET active_flat_set_id = " + std::to_string(set_id) +
+                       " WHERE id = " + std::to_string(rig));
+            send_json(res, json{{"id", set_id}, {"label", label}, {"assigned", assigned}}, 201);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Patch(R"(/api/v1/equipment/flat-sets/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            const std::string id = std::string(req.matches[1]);
+            json body = json::parse(req.body);
+            auto d = db();
+            if (d.query("SELECT id FROM flat_sets WHERE id = " + id).empty()) {
+                send_error(res, 404, "no such flat set"); return;
+            }
+            std::vector<std::string> sets;
+            if (body.contains("label")) {
+                const std::string nm = body["label"].get<std::string>();
+                if (nm.empty()) { send_error(res, 400, "label cannot be empty"); return; }
+                sets.push_back("label = '" + d.escape(nm) + "'");
+            }
+            if (body.contains("notes"))
+                sets.push_back(body["notes"].is_null() ? "notes = NULL"
+                               : "notes = '" + d.escape(body["notes"].get<std::string>()) + "'");
+            for (const char* k : {"valid_from", "valid_to"})
+                if (body.contains(k)) {
+                    if (body[k].is_null() || (body[k].is_string() && body[k].get<std::string>().empty()))
+                        sets.push_back(std::string(k) + " = NULL");
+                    else sets.push_back(std::string(k) + " = '" + d.escape(body[k].get<std::string>()) + "'");
+                }
+            if (sets.empty()) { send_error(res, 400, "nothing to update"); return; }
+            std::string sql = "UPDATE flat_sets SET ";
+            for (size_t i = 0; i < sets.size(); ++i) sql += (i ? ", " : "") + sets[i];
+            try { d.exec(sql + " WHERE id = " + id); }
+            catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
+            send_json(res, json{{"updated", std::stoi(id)}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/equipment/flat-sets/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const std::string id = std::string(req.matches[1]);
+            d.exec("UPDATE frames SET flat_set_id = NULL WHERE flat_set_id = " + id);
+            const long long freed = d.affected_rows();
+            d.exec("UPDATE rigs SET active_flat_set_id = NULL WHERE active_flat_set_id = " + id);
+            d.exec("DELETE FROM flat_sets WHERE id = " + id);  // pins cascade via FK
+            send_json(res, json{{"deleted", std::stoi(id)}, {"freed", freed}});
+        } catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    // Explicit override pins: (rig + session_night) or a saved query -> a set.
+    server->Post("/api/v1/equipment/flat-pins", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            json body = json::parse(req.body);
+            const long long set_id = body.value("flat_set_id", 0LL);
+            const std::string scope = body.value("scope", "");
+            if (set_id <= 0) { send_error(res, 400, "flat_set_id is required"); return; }
+            auto d = db();
+            if (d.query("SELECT id FROM flat_sets WHERE id = " + std::to_string(set_id)).empty()) {
+                send_error(res, 404, "no such flat set"); return;
+            }
+            if (scope == "rig_night") {
+                const long long rig = body.value("rig_id", 0LL);
+                const std::string night = body.value("session_night", "");
+                if (rig <= 0 || night.empty()) { send_error(res, 400, "rig_id and session_night are required"); return; }
+                // One pin per (rig, night); a repeat re-points it.
+                d.exec("INSERT INTO light_flat_pins (flat_set_id, scope, rig_id, session_night) VALUES (" +
+                       std::to_string(set_id) + ", 'rig_night', " + std::to_string(rig) + ", '" +
+                       d.escape(night) + "') ON DUPLICATE KEY UPDATE flat_set_id = VALUES(flat_set_id)");
+            } else if (scope == "saved_query") {
+                const long long q = body.value("saved_query_id", 0LL);
+                if (q <= 0) { send_error(res, 400, "saved_query_id is required"); return; }
+                d.exec("DELETE FROM light_flat_pins WHERE scope = 'saved_query' AND saved_query_id = " + std::to_string(q));
+                d.exec("INSERT INTO light_flat_pins (flat_set_id, scope, saved_query_id) VALUES (" +
+                       std::to_string(set_id) + ", 'saved_query', " + std::to_string(q) + ")");
+            } else { send_error(res, 400, "scope must be rig_night or saved_query"); return; }
+            send_json(res, json{{"ok", true}}, 201);
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
+    server->Delete(R"(/api/v1/equipment/flat-pins/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!require_admin(req, res)) return;
+        try {
+            auto d = db();
+            const std::string id = std::string(req.matches[1]);
+            d.exec("DELETE FROM light_flat_pins WHERE id = " + id);
+            send_json(res, json{{"deleted", std::stoi(id)}});
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 

@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(StarBase
-    VERSION 0.1.7
+    VERSION 0.1.12
     DESCRIPTION "A queryable interface to astronomical image files"
     HOMEPAGE_URL "https://github.com/DavidGilinsky/StarBase"
     LANGUAGES C CXX)
@@ -137,7 +137,7 @@ if(SB_WITH_DB)
         # Filter-AST -> SQL query compiler (nlohmann/json in + the DB for escaping).
         add_library(sb_query STATIC src/query/query.cpp)
         target_include_directories(sb_query PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/query)
-        target_link_libraries(sb_query PUBLIC sb_db sb_httplib)
+        target_link_libraries(sb_query PUBLIC sb_db sb_httplib sb_names)
 
         # Calibration matcher: darks/flats/bias/dark-flats for a light, ranked
         # and explained, driven by the declarative calibration_rules.

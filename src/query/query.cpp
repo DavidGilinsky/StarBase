@@ -9,6 +9,8 @@
 // ---------------------------------------------------------------------------
 #include "query.hpp"
 
+#include "canon.hpp"
+
 #include <cmath>
 #include <map>
 #include <string>
@@ -182,6 +184,22 @@ std::string compile_comparison(const json& node, db::Database& db) {
 
     if (op == "isnull") return field + " IS NULL";
     if (op == "notnull") return field + " IS NOT NULL";
+
+    // Object search is catalog-aware: a value is expanded to its equivalent
+    // designations (M31 / M 31 / NGC 224 all resolve) and matched against the
+    // spacing-normalized object_canonical, so either catalog number finds an
+    // object that has both.
+    if (field == "object" && (op == "eq" || op == "like") &&
+        node.contains("value") && node.at("value").is_string()) {
+        const auto ds = starbase::names::designations(node.at("value").get<std::string>());
+        std::string out = "(";
+        for (size_t i = 0; i < ds.size(); ++i) {
+            out += (i ? " OR " : "");
+            out += (op == "eq") ? "object_canonical = '" + db.escape(ds[i]) + "'"
+                                : "object_canonical LIKE '%" + db.escape(ds[i]) + "%'";
+        }
+        return out + ")";
+    }
 
     if (op == "in") {
         const json& v = node.at("value");

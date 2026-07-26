@@ -9,8 +9,10 @@
 // Version:       0.1.0
 // License:       GPL-3.0-or-later
 // ---------------------------------------------------------------------------
+#include <algorithm>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "canon.hpp"
 
@@ -66,6 +68,29 @@ int main() {
     eq("SAC Abell 2634", "SAC Abell 2634");  // prefix not at the start
     eq("vdB 142", "vdB 142");
     eq("  NGC   6960 ", "NGC 6960");   // trimmed and collapsed
+
+    // ---- Messier <-> NGC/IC equivalence collapses to the Messier form ----
+    eq("NGC224", "M 31");
+    eq("ngc 224", "M 31");
+    eq("NGC 5457", "M 101");
+    eq("IC4725", "M 25");            // an IC-numbered Messier
+    eq("NGC 7000", "NGC 7000");     // no Messier equivalent: unchanged
+    eq("M 45", "M 45");             // Pleiades: no NGC/IC, stays Messier
+
+    // ---- designations(): every equivalent form, from either input spelling ----
+    {
+        auto has = [](const std::vector<std::string>& v, const std::string& s) {
+            return std::find(v.begin(), v.end(), s) != v.end();
+        };
+        auto d1 = n::designations("M31");
+        check(d1.size() == 2 && has(d1, "M 31") && has(d1, "NGC 224"), "M31 -> {M 31, NGC 224}");
+        auto d2 = n::designations("ngc 224");
+        check(d2.size() == 2 && has(d2, "M 31") && has(d2, "NGC 224"), "NGC 224 -> {M 31, NGC 224}");
+        auto d3 = n::designations("M45");
+        check(d3.size() == 1 && has(d3, "M 45"), "M45 -> {M 45} (no equivalent)");
+        auto d4 = n::designations("NGC 7000");
+        check(d4.size() == 1 && has(d4, "NGC 7000"), "NGC 7000 -> {NGC 7000}");
+    }
 
     // ---- placeholders ----
     check(n::canonicalize("Target").placeholder, "'Target' is a placeholder");

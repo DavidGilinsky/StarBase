@@ -125,6 +125,78 @@ std::optional<LightKey> light_key_for(db::Database& db, long long frame_id) {
     return L;
 }
 
+namespace {
+
+// The flat set a light should use, if one resolves, with a human-readable
+// reason. Priority: an explicit (rig + night) pin; then, for a fixed rig (one
+// with a site), the sticky set effective on-or-before the light's night; for a
+// mobile rig (no site), the set captured that same night. Empty otherwise, so
+// the caller falls back to the heuristic flat rule.
+struct FlatSetPick { long long id; std::string reason; };
+
+std::optional<FlatSetPick> resolve_flat_set(db::Database& db, const LightKey& L) {
+    if (!L.rig_id) return std::nullopt;
+    const std::string rig = std::to_string(*L.rig_id);
+    const std::string night = L.session_night ? db.escape(*L.session_night) : std::string();
+
+    // 1. An explicit (rig + night) pin wins outright.
+    if (L.session_night) {
+        auto p = db.query("SELECT fs.id, fs.label FROM light_flat_pins p "
+                          "JOIN flat_sets fs ON fs.id = p.flat_set_id "
+                          "WHERE p.scope = 'rig_night' AND p.rig_id = " + rig +
+                          " AND p.session_night = '" + night + "' LIMIT 1");
+        if (!p.empty() && p[0][0])
+            return FlatSetPick{std::stoll(*p[0][0]),
+                "pinned flat set '" + p[0][1].value_or("") + "' for " + night};
+    }
+
+    auto rr = db.query("SELECT site_id, active_flat_set_id FROM rigs WHERE id = " + rig + " LIMIT 1");
+    if (rr.empty()) return std::nullopt;
+    const bool fixed = rr[0][0].has_value();  // has a site
+
+    if (fixed) {
+        if (L.session_night) {
+            // An explicit validity window covering the night, newest first.
+            auto w = db.query(
+                "SELECT id, label FROM flat_sets WHERE rig_id = " + rig + " AND ("
+                "(valid_from IS NOT NULL AND valid_to IS NOT NULL AND '" + night + "' BETWEEN valid_from AND valid_to) OR "
+                "(valid_from IS NOT NULL AND valid_to IS NULL AND '" + night + "' >= valid_from)) "
+                "ORDER BY captured_night DESC, id DESC LIMIT 1");
+            if (!w.empty() && w[0][0])
+                return FlatSetPick{std::stoll(*w[0][0]),
+                    "flat set '" + w[0][1].value_or("") + "' (window covers " + night + ")"};
+            // Else the newest set captured on or before the night.
+            auto n = db.query(
+                "SELECT id, label FROM flat_sets WHERE rig_id = " + rig +
+                " AND (captured_night IS NULL OR captured_night <= '" + night + "') "
+                "ORDER BY captured_night DESC, id DESC LIMIT 1");
+            if (!n.empty() && n[0][0])
+                return FlatSetPick{std::stoll(*n[0][0]),
+                    "flat set '" + n[0][1].value_or("") + "' (newest on/before " + night + ", fixed rig)"};
+        }
+        // Ultimate fallback: the rig's declared active set.
+        if (rr[0][1]) {
+            const std::string sid = *rr[0][1];
+            auto a = db.query("SELECT label FROM flat_sets WHERE id = " + sid);
+            return FlatSetPick{std::stoll(sid),
+                "active flat set '" + (a.empty() ? std::string() : a[0][0].value_or("")) + "' (fixed rig)"};
+        }
+        return std::nullopt;
+    }
+
+    // Mobile rig: the set captured the same session night.
+    if (L.session_night) {
+        auto s = db.query("SELECT id, label FROM flat_sets WHERE rig_id = " + rig +
+                          " AND captured_night = '" + night + "' ORDER BY id DESC LIMIT 1");
+        if (!s.empty() && s[0][0])
+            return FlatSetPick{std::stoll(*s[0][0]),
+                "flat set '" + s[0][1].value_or("") + "' from the same session (" + night + ")"};
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
 std::vector<MatchResult> match_calibration(db::Database& db, const LightKey& L, int limit) {
     std::vector<MatchResult> out;
 
@@ -146,6 +218,44 @@ std::vector<MatchResult> match_calibration(db::Database& db, const LightKey& L, 
         json spec;
         try { spec = json::parse(match_json); }
         catch (const std::exception&) { mr.warning = "rule has invalid match_json"; out.push_back(mr); continue; }
+
+        // Flat sets override the time/session heuristic: when a specific set is
+        // pinned or active for this light's rig, its flats (for the light's
+        // filter, masters first) are the answer, and the rule's ranking is not
+        // consulted. If no set resolves, fall through to the heuristic below.
+        if (mr.target_type == "flat") {
+            if (auto pick = resolve_flat_set(db, L)) {
+                std::string w = "f.flat_set_id = " + std::to_string(pick->id);
+                if (L.filter_id)
+                    w += " AND (f.filter_id = " + std::to_string(*L.filter_id) + " OR f.filter_id IS NULL)";
+                auto tr = db.query("SELECT COUNT(*) FROM frames f WHERE " + w);
+                mr.total = (tr.empty() || !tr[0][0]) ? 0 : std::stoll(*tr[0][0]);
+                auto rows = db.query(
+                    "SELECT f.id, f.image_type, f.session_night, f.date_obs_utc, fl.filename, "
+                    "CONCAT(r.path,'/',fl.rel_path) FROM frames f JOIN files fl ON fl.id = f.file_id "
+                    "JOIN roots r ON r.id = fl.root_id WHERE " + w +
+                    " ORDER BY (f.image_type = 'master') DESC, f.date_obs_utc ASC LIMIT " +
+                    std::to_string(limit));
+                int rank = 0;
+                for (const auto& fr : rows) {
+                    Candidate c;
+                    c.frame_id = std::stoll(*fr[0]);
+                    c.image_type = cell(fr, 1).value_or("");
+                    c.is_master = c.image_type == "master";
+                    c.session_night = cell(fr, 2).value_or("");
+                    c.date_obs_utc = cell(fr, 3).value_or("");
+                    c.filename = cell(fr, 4).value_or("");
+                    c.abs_path = cell(fr, 5).value_or("");
+                    c.score = 1.0 - static_cast<double>(rank++) / (limit + 1);
+                    c.reason = (c.is_master ? "master flat · " : "flat · ") + pick->reason;
+                    mr.candidates.push_back(std::move(c));
+                }
+                mr.rule_name += " (flat set)";
+                if (mr.total == 0) mr.warning = "flat set resolved, but it has no flats for this filter";
+                out.push_back(std::move(mr));
+                continue;
+            }
+        }
 
         // The target frames: raw calibration of this type, plus masters of it.
         std::string where = "(f.image_type = '" + db.escape(mr.target_type) +

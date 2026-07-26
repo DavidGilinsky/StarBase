@@ -217,6 +217,15 @@ distinct raw names with their offline and Sesame proposals and writes the chosen
 canonical into `object_canonical` (a dry-run reports the affected frame counts;
 the raw card is never touched). `object_canonical` is a queryable field.
 
+The canonicalizer also carries the **Messier <-> NGC/IC cross-reference**, so an
+object with both designations collapses to its Messier form (`NGC 224` -> `M 31`;
+`M40`/`M45`, which have no NGC/IC, stay Messier). Object search is built on this:
+a query value is expanded to all its equivalent designations
+(`names::designations`) and matched against `object_canonical`, so **M31, M 31,
+NGC224, and NGC 224 all find the same target** in both Browse and the query AST,
+and on already-indexed data (whose `object_canonical` is at least
+spacing-normalized) without a rescan. The object facet lists canonical names.
+
 **Sidecars** (`.txt`/`.json`/`.csv`/`.log` logs written alongside frames,
 NINA/TSX artifacts) are recorded in an `artifacts` table, not parsed for
 metadata in v1. *Implemented (M9)*: the walk enqueues sidecar-class files, the
@@ -476,6 +485,33 @@ Masters (`MasterDark`, `MasterFlat`, ...) rank above raw stacks when present.
 The matcher returns a ranked candidate list with a score **and a human-readable
 reason per candidate**, and the UI shows why each was chosen and lets the user
 override. A match that cannot be explained is a match that cannot be trusted.
+
+### 8.1 Flat sets
+
+The heuristic above (same session, then nearest) is right until it isn't: a
+re-flat after a rotation, dawn flats for a multi-night run, or a master you want
+used regardless of time. So a specific group of flats, or a master, can be bound
+to specific lights as a **flat set** (`flat_sets`, one per rig; member flats and
+master flats carry `frames.flat_set_id`). The binding rule keys off whether the
+rig has a site, because that is exactly the mobile/fixed distinction:
+
+- **Mobile rig (no site).** Torn down between sessions, so it is re-flatted each
+  night. A light binds to the set with the same rig and `session_night`. The
+  noon-to-noon night already groups a night's dusk flats, lights, and dawn flats
+  together, so before-vs-after acquisition order does not matter.
+- **Fixed rig (has a site).** One set stays active across nights until a new one
+  supersedes it (a disassembly/reassembly boundary). A light binds to the newest
+  set captured on or before its night (`rigs.active_flat_set_id` names the
+  current one; an explicit `valid_from`/`valid_to` overrides the derived window).
+- **Pins (`light_flat_pins`).** An explicit (rig + night), or a saved query,
+  pinned to a set. Pins override both cases.
+
+Resolution order in the matcher is therefore **pin → active/windowed (fixed) or
+same-night (mobile) → the heuristic flat rule**, and each still yields a plain
+reason ("pinned flat set 'B' for 2026-03-05", "newest on/before ..., fixed rig").
+Sets are inferred from the archive by clustering a rig's flats on the `DATE-OBS`
+gap (no ingest dependency); nwingest may later stamp an authoritative `FLATSET`
+id, which StarBase consumes as a header dialect and prefers when present.
 
 ## 9. PixInsight / WBPP bridge
 
