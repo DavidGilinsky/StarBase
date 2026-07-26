@@ -21,8 +21,8 @@
 -- is_default marks the site used when a frame's rig does not pin one.
 INSERT IGNORE INTO sites (name, latitude, longitude, elevation_m, timezone,
                           utc_offset_h, sqm_sensor, is_default)
-VALUES ('ExampleSite', 0.00000, -0.00000, 670, 'America/Phoenix', -7,
-        'DSN036', 1);
+VALUES ('ExampleSite', 0.00000, 0.00000, 0, 'UTC', 0,
+        'SQM01', 1);
 
 -- Cameras. Colour vs mono is detected per-frame from BAYERPAT; the model is the
 -- calibration key.

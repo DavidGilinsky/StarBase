@@ -29,7 +29,7 @@
 namespace starbase::pix {
 
 // A stored preprocessing profile: the knobs StarBase renders into a WBPP
-// command line. Defaults suit the ExampleSite archive (top-down FITS, grouping
+// command line. Defaults suit a typical archive (top-down FITS, grouping
 // by filter). Anything not modelled here is appended verbatim via extra_params
 // as raw "key=value" tokens.
 struct WbppProfile {

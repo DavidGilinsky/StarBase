@@ -95,7 +95,7 @@ INSERT IGNORE INTO header_map (field, keyword, priority, notes) VALUES
   ('elevation_m', 'OBSGEO-H',  10, NULL),
   ('elevation_m', 'SITEELEV',  20, NULL),
   ('elevation_m', 'ALT-OBS',   30, NULL),
-  ('observatory', 'OBSERVAT',  10, 'ExampleSite, 65%'),
+  ('observatory', 'OBSERVAT',  10, '65% present'),
   ('observatory', 'SITENAME',  20, 'often present but empty'),
   ('observer',    'OBSERVER',  10, '81%'),
 
