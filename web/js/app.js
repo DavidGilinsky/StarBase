@@ -157,16 +157,23 @@ async function dashboard() {
 
 // ---- results grid (shared by Browse and Query) -----------------------------
 
-function resultsTable(frames) {
+// Fields already shown by a fixed column, so a query on one adds no new column.
+const BASE_RESULT_FIELDS = new Set(['image_type', 'object', 'filter', 'session_night', 'exposure_s', 'gain', 'rig']);
+
+// `extraFields` (the fields a query filtered on) become extra columns between Rig
+// and File, so the results reflect exactly what was queried.
+function resultsTable(frames, extraFields) {
+  const extra = (extraFields || []).filter(f => !BASE_RESULT_FIELDS.has(f));
+  const headers = ['Type', 'Target', 'Filter', 'Night', 'Exp', 'Gain', 'Rig', ...extra, 'File'];
   return el('table', {},
-    el('thead', {}, el('tr', {},
-      ...['Type', 'Target', 'Filter', 'Night', 'Exp', 'Gain', 'Rig', 'File'].map(h => el('th', {}, h)))),
+    el('thead', {}, el('tr', {}, ...headers.map(h => el('th', {}, h)))),
     el('tbody', {}, ...frames.map(fr =>
       el('tr', { onclick: () => detail(fr.frame_id) },
         el('td', {}, el('span', { class: 'pill ' + fr.image_type }, fr.image_type)),
         el('td', {}, fmt(fr.object)), el('td', {}, fmt(fr.filter)),
         el('td', {}, fmt(fr.session_night)), el('td', { class: 'num' }, num(fr.exposure_s, 0) + 's'),
         el('td', { class: 'num' }, fmt(fr.gain)), el('td', {}, fmt(fr.rig)),
+        ...extra.map(f => el('td', { class: FIELDS[f] === 'num' ? 'num' : '' }, fmt(fr[f]))),
         el('td', { class: 'muted' }, fr.filename)))));
 }
 
@@ -410,7 +417,7 @@ async function runQuery() {
     renderQuery();
     const grid = document.getElementById('qgrid');
     if (grid) {
-      grid.replaceChildren(resultsTable(data.frames));
+      grid.replaceChildren(resultsTable(data.frames, data.query_fields));
       const from = data.total ? qb.offset + 1 : 0;
       const to = Math.min(qb.offset + qb.limit, data.total);
       document.getElementById('qpager').replaceChildren(

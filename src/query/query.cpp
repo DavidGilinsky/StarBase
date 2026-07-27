@@ -11,6 +11,7 @@
 
 #include "canon.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <string>
@@ -248,11 +249,35 @@ std::string compile_node(const json& node, db::Database& db) {
     return compile_comparison(node, db);
 }
 
+// Walk the AST, collecting distinct allowlisted field names in first-seen order.
+void collect_fields(const json& node, std::vector<std::string>& out) {
+    if (!node.is_object()) return;
+    const std::string op = node.value("op", "");
+    if (op == "and" || op == "or" || op == "not") {
+        if (node.contains("clauses") && node["clauses"].is_array())
+            for (const auto& c : node["clauses"]) collect_fields(c, out);
+        return;
+    }
+    // cone / tagged / untagged / in_collection carry no promoted column.
+    if (op == "cone" || op == "tagged" || op == "untagged" || op == "in_collection") return;
+    if (node.contains("field") && node["field"].is_string()) {
+        const std::string f = node["field"].get<std::string>();
+        if (fields().count(f) && std::find(out.begin(), out.end(), f) == out.end())
+            out.push_back(f);
+    }
+}
+
 }  // namespace
 
 std::string compile_filter(const json& ast, db::Database& db) {
     if (ast.is_null() || (ast.is_object() && ast.empty())) return "1=1";
     return compile_node(ast, db);
+}
+
+std::vector<std::string> filter_fields(const json& ast) {
+    std::vector<std::string> out;
+    if (ast.is_object() && !ast.empty()) collect_fields(ast, out);
+    return out;
 }
 
 std::string compile_sort(const json& sort) {

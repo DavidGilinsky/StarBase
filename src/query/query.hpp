@@ -18,6 +18,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "database.hpp"
 
@@ -50,5 +51,11 @@ std::string compile_filter(const nlohmann::json& ast, db::Database& db);
 //   [{"field":"date_obs_utc","dir":"desc"}, {"field":"exposure_s"}]
 // Defaults to "date_obs_utc DESC" when empty. Only allowlisted fields sort.
 std::string compile_sort(const nlohmann::json& sort);
+
+// The distinct promoted fields a filter AST references, in first-seen order, so a
+// caller can surface exactly what was queried (e.g. as result columns). Skips
+// logical combinators and cone/tag/collection nodes, and returns only names in
+// the field allowlist, so each is a safe v_frames column identifier.
+std::vector<std::string> filter_fields(const nlohmann::json& ast);
 
 }  // namespace starbase::query

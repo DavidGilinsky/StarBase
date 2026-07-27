@@ -918,7 +918,11 @@ SELECT
     fs.label                   AS flat_set,
     fr.focus_pos,
     fr.rotator_deg,
-    fr.guide_rms_arcsec
+    fr.guide_rms_arcsec,
+    fr.pier_side,
+    fr.row_order,
+    fr.naxis1,
+    fr.naxis2
 FROM frames fr
 JOIN files   f   ON f.id  = fr.file_id
 JOIN roots   r   ON r.id  = f.root_id

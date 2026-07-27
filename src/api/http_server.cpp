@@ -577,21 +577,38 @@ void HttpServer::Impl::routes() {
             auto tr = d.query("SELECT COUNT(*) FROM v_frames WHERE " + where);
             const long long total = (tr.empty() || !tr[0][0]) ? 0 : std::stoll(*tr[0][0]);
 
-            const std::vector<std::string> cols = {
+            std::vector<std::string> cols = {
                 "frame_id",   "abs_path",   "filename",  "image_type", "object",
                 "filter",     "session_night", "date_obs_utc", "exposure_s", "gain",
                 "rig",        "camera",     "site",      "sqm_mag_arcsec2"};
-            auto rows = d.query(
-                "SELECT frame_id, abs_path, filename, image_type, object, filter, "
-                "session_night, date_obs_utc, exposure_s, gain, rig, camera, site, "
-                "sqm_mag_arcsec2 FROM v_frames WHERE " + where + " ORDER BY " + order +
-                " LIMIT " + std::to_string(limit) + " OFFSET " + std::to_string(offset));
+            // Reflect the query: add each field the filter used as a column (when
+            // it is a real v_frames column and not already selected), and echo the
+            // queried field list so the UI can render those columns.
+            std::set<std::string> viewcols;
+            for (const auto& r : d.query(
+                     "SELECT column_name FROM information_schema.columns WHERE "
+                     "table_schema = DATABASE() AND table_name = 'v_frames'"))
+                if (r[0]) viewcols.insert(*r[0]);
+            json query_fields = json::array();
+            std::set<std::string> have(cols.begin(), cols.end());
+            for (const auto& f : starbase::query::filter_fields(body.value("filter", json()))) {
+                if (!viewcols.count(f)) continue;  // ignore a field not exposed by the view
+                query_fields.push_back(f);
+                if (!have.count(f)) { cols.push_back(f); have.insert(f); }
+            }
+
+            std::string sel;
+            for (size_t i = 0; i < cols.size(); ++i) sel += (i ? ", " : "") + cols[i];
+            auto rows = d.query("SELECT " + sel + " FROM v_frames WHERE " + where +
+                                " ORDER BY " + order + " LIMIT " + std::to_string(limit) +
+                                " OFFSET " + std::to_string(offset));
 
             json j;
             j["total"] = total;
             j["limit"] = limit;
             j["offset"] = offset;
-            j["where"] = where;  // echoed so a caller can see the compiled predicate
+            j["where"] = where;             // echoed so a caller can see the predicate
+            j["query_fields"] = query_fields;  // fields the filter used, for result columns
             j["frames"] = rows_to_json(rows, cols);
             send_json(res, j);
         } catch (const json::exception& e) {
