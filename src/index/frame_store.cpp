@@ -110,9 +110,9 @@ StoreResult store_file_once(db::Database& db, const FileInfo& info,
         f.str("mtime_utc", info.mtime_utc);
         f.num("inode", info.inode);
         f.raw("status", "'ok'");
-        f.raw("last_seen_utc", "UTC_TIMESTAMP()");
+        f.raw("last_seen_utc", "UTC_TIMESTAMP(6)");
         f.raw("last_indexed_utc", "UTC_TIMESTAMP()");
-        f.raw("first_seen_utc", "UTC_TIMESTAMP()");
+        f.raw("first_seen_utc", "UTC_TIMESTAMP(6)");
         f.raw("error", "NULL");
         // first_seen stays put on re-index; a re-indexed file keeps its history.
         db.exec(f.build("files", {"first_seen_utc"}));

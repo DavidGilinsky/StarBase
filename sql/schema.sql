@@ -285,8 +285,10 @@ CREATE TABLE IF NOT EXISTS files (
     inode            BIGINT        NULL,        -- hint only, see note above
     status           ENUM('pending','ok','error','missing') NOT NULL DEFAULT 'pending',
     error            VARCHAR(512)  NULL,
-    first_seen_utc   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_seen_utc    DATETIME      NULL,
+    -- Microsecond precision: reconciliation tells this scan's stamps from a prior
+    -- scan's, even when two scans fall within the same wall-clock second.
+    first_seen_utc   DATETIME(6)   NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    last_seen_utc    DATETIME(6)   NULL,
     last_indexed_utc DATETIME      NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_files_path (root_id, rel_path_hash),
@@ -865,6 +867,18 @@ CREATE TABLE IF NOT EXISTS object_names (
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS flat_set_id INT NULL;
 ALTER TABLE frames ADD KEY IF NOT EXISTS idx_frames_flat_set (flat_set_id);
 ALTER TABLE rigs   ADD COLUMN IF NOT EXISTS active_flat_set_id INT NULL;
+
+-- Upgrade files' seen-timestamps to microsecond precision (needed by the scan's
+-- move/delete reconciliation). Guarded so it rebuilds the table only once, not on
+-- every start; a fresh install already has DATETIME(6) from the CREATE above.
+SET @sb_prec := (SELECT datetime_precision FROM information_schema.columns
+                 WHERE table_schema = DATABASE() AND table_name = 'files'
+                 AND column_name = 'last_seen_utc');
+SET @sb_sql := IF(@sb_prec IS NOT NULL AND @sb_prec < 6,
+  'ALTER TABLE files MODIFY last_seen_utc DATETIME(6) NULL, '
+  'MODIFY first_seen_utc DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)',
+  'DO 0');
+PREPARE sb_stmt FROM @sb_sql; EXECUTE sb_stmt; DEALLOCATE PREPARE sb_stmt;
 
 CREATE OR REPLACE VIEW v_frames AS
 SELECT

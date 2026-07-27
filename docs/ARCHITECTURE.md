@@ -99,6 +99,29 @@ Two tiers, because the storage answer is "mixed".
 extractor threads consume. Runs on a per-root interval and on demand. Bounded
 queue is what keeps memory flat on a tree of a million frames.
 
+**Reconciliation (why the sweep alone is authoritative).** Identity is the path
+(`files.rel_path_hash`), so a sweep that only ever inserts would leave a renamed
+or moved file as a new row and orphan the old one. After each sweep, a
+reconciliation pass makes the index match the disk without re-stat-ing anything.
+A file the sweep did not touch (its `last_seen` predates the scan-start instant,
+captured on the server clock at microsecond precision so back-to-back scans do
+not collapse into one second) has either moved or been deleted. It is a **move**
+when its content fingerprint (`DATE-OBS|INSTRUME|EXPTIME|geometry|IMAGETYP|binning`,
+the same key StarBase already stores) reappears, unambiguously, at a path the
+sweep just created: the surviving row is re-anchored to the new path in place, so
+its `frame_id` and every tag, collection, and flat-set association are preserved,
+and the duplicate the sweep made is dropped. Otherwise it is a **delete**, and the
+row is soft-marked `status='missing'` (kept, not purged, so a file that returns,
+at the same path or a new one, re-links and restores its associations). Clearing
+missing rows for good is a separate, manual step (`starbasectl prune-missing`, a
+button on the Database tab, or `POST /api/v1/db/prune-missing`), with an optional
+minimum age and a dry-run count; deleting a file row cascades its frames and
+their tag/collection memberships. Ambiguous
+cases (a colliding fingerprint, or a frame with no `DATE-OBS`) fall back to
+delete-plus-add rather than guess. A **mount-failure guard** refuses to run the
+mark-missing pass when a sweep saw far fewer files than the root held (an empty or
+half-mounted NFS/SMB share), so a transient outage cannot mark an archive gone.
+
 *Why threaded, and how many threads (measured, not guessed).* A header read is
 network-latency-bound: it is a handful of NFS round-trips (open, read the header
 blocks, close), not computation. That is exactly the workload concurrency helps,

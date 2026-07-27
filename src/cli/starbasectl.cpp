@@ -43,6 +43,8 @@ void print_help(const char* argv0) {
         << "  db-status                Show connection, schema version, table count\n"
         << "  add-root <label> <path>  Register a directory tree to index\n"
         << "  list-roots               Show registered roots and scan status\n"
+        << "  prune-missing [--older-than <days>] [--yes]\n"
+        << "                           Delete files marked 'missing' by rescan\n"
         << "  set-root <label> <k=v>.. Change a root (enabled, writable, watch_mode,\n"
         << "                           scan_interval_s, settle_seconds)\n"
         << "  remove-root <label>      Unregister a root (indexed rows are removed)\n"
@@ -419,13 +421,51 @@ int main(int argc, char** argv) {
                               << st.files_updated << " updated, " << st.files_skipped << " unchanged, "
                               << st.files_settling << " settling, " << st.files_error << " error; "
                               << st.frames_written << " frames, " << st.artifacts_recorded
-                              << " sidecars in " << st.duration_ms << " ms\n";
+                              << " sidecars; " << st.files_moved << " moved, " << st.files_missing
+                              << " missing in " << st.duration_ms << " ms\n";
                 } catch (const std::exception& e) {
                     std::cerr << "  scan failed: " << e.what() << "\n";
                     rc = 1;
                 }
             }
             return rc;
+        }
+
+        if (cmd == "prune-missing") {
+            int days = 0;
+            bool yes = false;
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (args[i] == "--older-than" && i + 1 < args.size()) days = std::atoi(args[++i].c_str());
+                else if (args[i] == "--yes" || args[i] == "-y") yes = true;
+                else { std::cerr << "usage: prune-missing [--older-than <days>] [--yes]\n"; return 2; }
+            }
+            auto pred = [&](const std::string& p) {
+                std::string w = p + "status = 'missing'";
+                if (days > 0)
+                    w += " AND " + p + "last_seen_utc IS NOT NULL AND " + p +
+                         "last_seen_utc < (UTC_TIMESTAMP() - INTERVAL " + std::to_string(days) + " DAY)";
+                return w;
+            };
+            long long files = 0, frames = 0;
+            if (auto r = d.query("SELECT COUNT(*) FROM files WHERE " + pred("")); !r.empty() && r[0][0])
+                files = std::stoll(*r[0][0]);
+            if (auto r = d.query("SELECT COUNT(*) FROM frames fr JOIN files fl ON fl.id = fr.file_id "
+                                 "WHERE " + pred("fl.")); !r.empty() && r[0][0])
+                frames = std::stoll(*r[0][0]);
+            if (files == 0) {
+                std::cout << "no missing files to prune"
+                          << (days > 0 ? " older than " + std::to_string(days) + " days" : "") << "\n";
+                return 0;
+            }
+            if (!yes) {
+                std::cout << files << " missing file(s) and " << frames << " frame(s) would be pruned"
+                          << (days > 0 ? " (not seen in " + std::to_string(days) + "+ days)" : "")
+                          << ".\nRe-run with --yes to delete them.\n";
+                return 0;
+            }
+            d.exec("DELETE FROM files WHERE " + pred(""));  // frames + tags/collections cascade
+            std::cout << "pruned " << files << " file(s) and " << frames << " frame(s)\n";
+            return 0;
         }
 
         std::cerr << "starbasectl: unknown command '" << cmd << "'\n";

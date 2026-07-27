@@ -1194,6 +1194,40 @@ void HttpServer::Impl::routes() {
         } catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
 
+    // ---- POST /api/v1/db/prune-missing  (delete long-missing file rows) ----
+    // Scan reconciliation soft-deletes vanished files (status='missing') so a
+    // returning file re-links. This is the manual, explicit cleanup: it removes
+    // those rows for good, cascading their frames and tag/collection memberships.
+    // older_than_days limits it to files not seen in that many days (0 = every
+    // missing file); dry_run counts without deleting.
+    server->Post("/api/v1/db/prune-missing", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!write_allowed(req)) { send_error(res, 403, "a login is required"); return; }
+        try {
+            json body = req.body.empty() ? json::object() : json::parse(req.body);
+            const int days = body.value("older_than_days", 0);
+            const bool dry = body.value("dry_run", false);
+            auto pred = [&](const std::string& p) {
+                std::string w = p + "status = 'missing'";
+                if (days > 0)
+                    w += " AND " + p + "last_seen_utc IS NOT NULL AND " + p +
+                         "last_seen_utc < (UTC_TIMESTAMP() - INTERVAL " + std::to_string(days) + " DAY)";
+                return w;
+            };
+            auto d = db();
+            long long files = 0, frames = 0;
+            if (auto r = d.query("SELECT COUNT(*) FROM files WHERE " + pred("")); !r.empty() && r[0][0])
+                files = std::stoll(*r[0][0]);
+            if (auto r = d.query("SELECT COUNT(*) FROM frames fr JOIN files fl ON fl.id = fr.file_id "
+                                 "WHERE " + pred("fl.")); !r.empty() && r[0][0])
+                frames = std::stoll(*r[0][0]);
+            if (!dry && files > 0) d.exec("DELETE FROM files WHERE " + pred(""));
+            send_json(res, json{{"dry_run", dry}, {"older_than_days", days},
+                                {"files", files}, {"frames", frames},
+                                {"pruned", dry ? 0 : files}});
+        } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
+          catch (const std::exception& e) { send_error(res, 500, e.what()); }
+    });
+
     // ---- Authentication (NightWatcher2 pattern) ---------------------------
     const int kSessionTtl = 7 * 24 * 3600;  // 7 days
 

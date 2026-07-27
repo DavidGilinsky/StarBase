@@ -60,6 +60,11 @@ struct ScanStats {
     long files_error = 0;      // unreadable/parse failure (recorded as status=error)
     long frames_written = 0;
     long artifacts_recorded = 0;  // sidecars/logs indexed into the artifacts table
+    // Post-sweep reconciliation: files whose path changed (re-anchored in place,
+    // keeping their frames and tags/collections) and files that vanished for real
+    // (marked status='missing'). Zero when the mount-failure guard skipped it.
+    long files_moved = 0;
+    long files_missing = 0;
     long long duration_ms = 0;
 };
 

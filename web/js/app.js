@@ -1010,6 +1010,21 @@ async function database() {
       scanHost);
 
     const mstatus = el('span', {});
+    // Prune: permanently remove files the rescan soft-deleted as 'missing'.
+    const missingCount = Number(((j.file_status || []).find(f => f.status === 'missing') || {}).count || 0);
+    const daysIn = el('input', { type: 'number', min: '0', placeholder: 'days (0=all)', style: 'width:8em' });
+    const pruneBtn = (me && me.role === 'admin') ? el('button', { class: 'btn ghost', onclick: async () => {
+      const days = Math.max(0, Number(daysIn.value) || 0);
+      mstatus.replaceChildren(el('span', { class: 'muted' }, 'checking…'));
+      try {
+        const dry = await apiPost('/db/prune-missing', { older_than_days: days, dry_run: true });
+        if (!dry.files) { mstatus.replaceChildren(el('span', { class: 'ok-msg' }, 'no missing files to prune')); return; }
+        if (!confirm(`Delete ${Number(dry.files).toLocaleString()} missing file(s) and ${Number(dry.frames).toLocaleString()} frame(s)${days ? ' not seen in ' + days + '+ days' : ''}?\n\nThese files are already gone from disk; this removes their index rows, frames, and tag/collection memberships. Not reversible.`)) { mstatus.replaceChildren(); return; }
+        const r = await apiPost('/db/prune-missing', { older_than_days: days, dry_run: false });
+        mstatus.replaceChildren(el('span', { class: 'ok-msg' }, `pruned ${Number(r.pruned).toLocaleString()} file(s), ${Number(r.frames).toLocaleString()} frame(s)`));
+        database();
+      } catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
+    } }, `Prune missing…${missingCount ? ' (' + missingCount.toLocaleString() + ')' : ''}`) : null;
     const maint = el('div', { class: 'card' }, el('h3', {}, 'Maintenance'),
       el('div', { class: 'row' },
         el('button', { class: 'btn', onclick: async () => {
@@ -1019,8 +1034,9 @@ async function database() {
         } }, 'Re-seed header mapping'),
         me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('targets') }, 'Review target names →') : null,
         me && me.role === 'admin' ? el('button', { class: 'btn', onclick: () => go('equipment') }, 'Manage equipment →') : null,
+        pruneBtn ? daysIn : null, pruneBtn,
         mstatus),
-      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Target-name normalization canonicalizes OBJECT values (M101 → “M 101”). Scanning runs in the background; watch it above.'));
+      el('div', { class: 'muted', style: 'margin-top:.4rem' }, 'Re-seeding re-applies the default header mapping (idempotent). Target-name normalization canonicalizes OBJECT values (M101 → “M 101”). Pruning permanently removes files the rescan marked “missing” (gone from disk); leave days at 0 for all, or set a minimum age. Scanning runs in the background; watch it above.'));
 
     app.replaceChildren(el('h2', {}, 'Database'), info, statusCard, scanCard, tablesCard, maint);
     watchScan(scanHost);  // reflect any scan already in progress (or show idle)

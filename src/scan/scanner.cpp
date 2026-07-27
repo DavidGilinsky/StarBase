@@ -18,8 +18,11 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <map>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "bounded_queue.hpp"
 #include "equipment.hpp"
@@ -117,6 +120,108 @@ std::string escape_like(const std::string& s) {
     return out;
 }
 
+// Post-sweep reconciliation, so a scheduled sweep alone keeps the index correct
+// across external renames, moves, and deletes. A file the sweep did not touch is
+// either moved (its content fingerprint reappeared at a new path this sweep) or
+// gone. A move re-anchors the existing row in place, preserving its frame ids and
+// every tag/collection/flat-set association; a real disappearance is soft-deleted
+// (status='missing'). Guarded so a mount that came up empty cannot wipe the index.
+struct ReconcileResult { long moved = 0; long missing = 0; };
+
+ReconcileResult reconcile_root(const db::DbConfig& db_config, const db::RootRow& root,
+                               const std::string& scan_start, long long prior_ok_count) {
+    ReconcileResult rr;
+    db::Database db(db_config);
+    const std::string rid = std::to_string(root.id);
+    const std::string ss = db.escape(scan_start);
+
+    // Healthy-sweep guard: refuse to reconcile when this sweep saw far fewer files
+    // than the root held. That usually means the mount was down or empty, not that
+    // everything was deleted, and marking a whole archive 'missing' is not a thing
+    // to do on a guess.
+    long long seen_now = 0;
+    if (auto r = db.query("SELECT COUNT(*) FROM files WHERE root_id = " + rid +
+                          " AND last_seen_utc >= '" + ss + "'"); !r.empty() && r[0][0])
+        seen_now = std::stoll(*r[0][0]);
+    if (prior_ok_count > 0 && (seen_now == 0 || seen_now < prior_ok_count / 2)) {
+        log_warn("scan: root '" + root.label + "' sweep saw " + std::to_string(seen_now) +
+                 " of " + std::to_string(prior_ok_count) +
+                 " indexed files; skipping reconciliation (probable mount issue)");
+        return rr;
+    }
+
+    // Files not touched by this sweep: moved or deleted.
+    auto vanished = db.query(
+        "SELECT id FROM files WHERE root_id = " + rid + " AND status <> 'missing' "
+        "AND (last_seen_utc IS NULL OR last_seen_utc < '" + ss + "')");
+    if (vanished.empty()) return rr;
+
+    // Content key of a file: its frames' fingerprints in HDU order. Empty when the
+    // file has no frames (e.g. an error row), which makes it non-matchable.
+    auto content_key = [&](const std::string& fid) {
+        std::string k;
+        for (const auto& f : db.query("SELECT LOWER(HEX(fingerprint)) FROM frames WHERE file_id = " +
+                                      fid + " ORDER BY hdu"))
+            if (f[0]) k += *f[0] + ";";
+        return k;
+    };
+
+    // Candidate move targets: rows created by this sweep, indexed by content key.
+    // A key that is not unique on either side is ambiguous, so no move is guessed
+    // and those files fall back to delete/add.
+    auto appeared = db.query(
+        "SELECT id, rel_path, LOWER(HEX(rel_path_hash)), filename, ext, format, bucket, "
+        "size_bytes, mtime_utc, inode, status FROM files WHERE root_id = " + rid +
+        " AND first_seen_utc >= '" + ss + "'");
+    std::map<std::string, size_t> appeared_by_key;
+    std::set<std::string> ambiguous;
+    for (size_t i = 0; i < appeared.size(); ++i) {
+        const std::string k = content_key(*appeared[i][0]);
+        if (k.empty()) continue;
+        if (!appeared_by_key.emplace(k, i).second) ambiguous.insert(k);
+    }
+    std::map<std::string, int> vk_count;
+    std::vector<std::string> vkeys(vanished.size());
+    for (size_t i = 0; i < vanished.size(); ++i) {
+        vkeys[i] = content_key(*vanished[i][0]);
+        if (!vkeys[i].empty()) ++vk_count[vkeys[i]];
+    }
+
+    auto sql_str = [&](const std::optional<std::string>& v) {
+        return v ? "'" + db.escape(*v) + "'" : std::string("NULL");
+    };
+    for (size_t i = 0; i < vanished.size(); ++i) {
+        const std::string vid = *vanished[i][0];
+        const std::string& k = vkeys[i];
+        auto it = (!k.empty() && !ambiguous.count(k) && vk_count[k] == 1)
+                      ? appeared_by_key.find(k) : appeared_by_key.end();
+        if (it != appeared_by_key.end()) {
+            const auto& A = appeared[it->second];
+            // Delete the duplicate new row first (frees its unique path hash and
+            // cascades its fresh frames), then re-anchor the surviving row to the
+            // new location. The survivor keeps its id, frames, and associations.
+            db.exec("DELETE FROM files WHERE id = " + std::string(*A[0]));
+            db.exec("UPDATE files SET rel_path = " + sql_str(A[1]) +
+                    ", rel_path_hash = UNHEX('" + db.escape(A[2].value_or("")) + "')" +
+                    ", filename = " + sql_str(A[3]) +
+                    ", ext = " + sql_str(A[4]) +
+                    ", format = " + sql_str(A[5]) +
+                    ", bucket = " + sql_str(A[6]) +
+                    ", size_bytes = " + (A[7] ? *A[7] : std::string("NULL")) +
+                    ", mtime_utc = " + sql_str(A[8]) +
+                    ", inode = " + (A[9] ? *A[9] : std::string("NULL")) +
+                    ", status = " + sql_str(A[10]) +
+                    ", last_seen_utc = UTC_TIMESTAMP(6), last_indexed_utc = UTC_TIMESTAMP() "
+                    "WHERE id = " + vid);
+            ++rr.moved;
+        } else {
+            db.exec("UPDATE files SET status = 'missing' WHERE id = " + vid);
+            ++rr.missing;
+        }
+    }
+    return rr;
+}
+
 }  // namespace
 
 ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
@@ -171,6 +276,21 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
     if (site.utc_offset_hours == 0.0 && registry.default_site_id)
         night_site.utc_offset_hours = registry.default_site_offset_h;
 
+    // Reconciliation baseline, captured on the server clock before the sweep
+    // touches anything: any indexed file whose last_seen stays older than this
+    // was not seen this pass, so it moved or was deleted. prior_ok_count feeds the
+    // mount-failure guard. Empty scan_start disables reconciliation for this pass.
+    std::string scan_start;
+    long long prior_ok_count = 0;
+    try {
+        db::Database rdb(db_config);
+        if (auto r = rdb.query("SELECT UTC_TIMESTAMP(6)"); !r.empty() && r[0][0]) scan_start = *r[0][0];
+        if (auto c = rdb.query("SELECT COUNT(*) FROM files WHERE root_id = " +
+                               std::to_string(root.id) + " AND status = 'ok'");
+            !c.empty() && c[0][0])
+            prior_ok_count = std::stoll(*c[0][0]);
+    } catch (const std::exception&) { /* leave scan_start empty -> skip reconciliation */ }
+
     // ---- workers ----
     auto worker = [&] {
         db::Database db(db_config);  // one connection per worker
@@ -216,7 +336,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
                         std::to_string(static_cast<long long>(st.st_size)) + ", '" + mtime +
                         "', UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE "
                         "kind=VALUES(kind), size_bytes=VALUES(size_bytes), "
-                        "mtime_utc=VALUES(mtime_utc), last_seen_utc=UTC_TIMESTAMP()");
+                        "mtime_utc=VALUES(mtime_utc), last_seen_utc=UTC_TIMESTAMP(6)");
                     arts.fetch_add(1);
                 } catch (const std::exception&) {
                     errored.fetch_add(1);  // a bad sidecar is a nuisance, not fatal
@@ -244,7 +364,7 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
                     std::stoll(*rows[0][1]) == static_cast<long long>(st.st_size) &&
                     rows[0][2]->substr(0, 19) == mtime.substr(0, 19);
                 if (unchanged) {
-                    db.exec("UPDATE files SET last_seen_utc = UTC_TIMESTAMP(), status='ok' "
+                    db.exec("UPDATE files SET last_seen_utc = UTC_TIMESTAMP(6), status='ok' "
                             "WHERE id = " + std::string(*rows[0][0]));
                     skipped.fetch_add(1);
                     continue;
@@ -280,8 +400,8 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
                         "', '" + db.escape(bucket_for(item->rel_path)) + "', " +
                         std::to_string(static_cast<long long>(st.st_size)) + ", '" + mtime +
                         "', 'error', '" + db.escape(std::string(e.what()).substr(0, 500)) +
-                        "', UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE status='error', "
-                        "error=VALUES(error), last_seen_utc=UTC_TIMESTAMP()");
+                        "', UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='error', "
+                        "error=VALUES(error), last_seen_utc=UTC_TIMESTAMP(6)");
                 } catch (const std::exception&) { /* best effort */ }
             }
         }
@@ -376,6 +496,23 @@ ScanStats scan_root(const db::DbConfig& db_config, const db::RootRow& root,
                             " WHERE id = " + std::string(*r[0]));
             }
         } catch (const std::exception&) { /* linking is best-effort */ }
+    }
+
+    // Reconcile external moves and deletes so the scheduled sweep is authoritative.
+    // Skipped on a cancelled scan: a partial sweep would look like mass deletion.
+    if (!scan_start.empty() && !stop_requested()) {
+        try {
+            const auto rec = reconcile_root(db_config, root, scan_start, prior_ok_count);
+            stats.files_moved = rec.moved;
+            stats.files_missing = rec.missing;
+            if (rec.moved || rec.missing)
+                log_info("scan: root '" + root.label + "' reconciled " +
+                         std::to_string(rec.moved) + " move(s), " +
+                         std::to_string(rec.missing) + " deletion(s)");
+        } catch (const std::exception& e) {
+            log_warn(std::string("scan: reconciliation failed for root '") + root.label +
+                     "': " + e.what());
+        }
     }
 
     stats.files_seen = seen.load();
