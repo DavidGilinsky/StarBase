@@ -1205,7 +1205,7 @@ async function equipment() {
       const vt = el('input', { type: 'date', value: s.valid_to || '', title: 'valid to', style: 'width:9.5em' });
       const row = [
         el('b', { style: 'min-width:9em' }, s.rig), label,
-        el('span', { class: 'muted' }, `${s.source} · ${s.captured_night || '—'} · ${Number(s.frames).toLocaleString()} flats`),
+        el('span', { class: 'muted' }, `${s.filter || 'all filters'} · ${s.source} · ${s.captured_night || '—'} · ${Number(s.frames).toLocaleString()} flats`),
       ];
       if (isSite) {
         // Fixed rig: sticky set, with an optional explicit validity window and
@@ -1269,18 +1269,19 @@ async function equipment() {
     const clRows = (fsug.clusters || []).map(c => {
       const rigObj = j.rigs.find(r => Number(r.id) === Number(c.rig_id));
       const isSite = !!(rigObj && rigObj.site_id);
-      const nm = el('input', { value: `${c.rig}-${(c.session_night || c.start_utc || '').slice(0, 10)}`, style: 'width:16em' });
+      const filt = c.filter || '';
+      const nm = el('input', { value: `${c.rig}-${filt ? filt + '-' : ''}${(c.session_night || c.start_utc || '').slice(0, 10)}`, style: 'width:16em' });
       const active = el('input', { type: 'checkbox' });
       const row = [
         el('span', { class: 'muted', style: 'min-width:22em' },
-          `${c.rig} · ${(c.start_utc || '').slice(0, 16)} → ${(c.end_utc || '').slice(11, 16)} · ${Number(c.frames).toLocaleString()} flats · ${(c.filters || []).join(', ')}`),
+          `${c.rig} · ${filt || '(no filter)'} · ${(c.start_utc || '').slice(0, 16)} → ${(c.end_utc || '').slice(11, 16)} · ${Number(c.frames).toLocaleString()} flats`),
         nm,
       ];
       if (isSite) row.push(el('label', { class: 'muted' }, active, ' active'));
       row.push(el('button', { class: 'btn primary', onclick: async () => {
         if (!nm.value.trim()) { fsugStatus.replaceChildren(el('span', { class: 'err-msg' }, 'name required')); return; }
         try {
-          const r = await apiPost('/equipment/flat-sets', { rig_id: Number(c.rig_id), label: nm.value.trim(), start_utc: c.start_utc, end_utc: c.end_utc, set_active: isSite ? active.checked : false });
+          const r = await apiPost('/equipment/flat-sets', { rig_id: Number(c.rig_id), filter_id: c.filter_id || 0, label: nm.value.trim(), start_utc: c.start_utc, end_utc: c.end_utc, set_active: isSite ? active.checked : false });
           fsugStatus.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.label}; assigned ${Number(r.assigned).toLocaleString()} flat(s)`));
           equipment();
         } catch (e) { fsugStatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }

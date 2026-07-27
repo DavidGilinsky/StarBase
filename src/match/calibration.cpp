@@ -139,12 +139,26 @@ std::optional<FlatSetPick> resolve_flat_set(db::Database& db, const LightKey& L)
     const std::string rig = std::to_string(*L.rig_id);
     const std::string night = L.session_night ? db.escape(*L.session_night) : std::string();
 
-    // 1. An explicit (rig + night) pin wins outright.
+    // A set fits a light's filter when it is filter-agnostic (filter_id NULL) or
+    // shares the filter; a filter-specific set is preferred over an agnostic one.
+    // fw/fo apply to bare flat_sets queries, fw_fs to the pin join.
+    std::string fw, fo, fw_fs;
+    if (L.filter_id) {
+        const std::string F = std::to_string(*L.filter_id);
+        fw = " AND (filter_id IS NULL OR filter_id = " + F + ")";
+        fw_fs = " AND (fs.filter_id IS NULL OR fs.filter_id = " + F + ")";
+        fo = "(filter_id IS NOT NULL) DESC, ";
+    } else {
+        fw = " AND filter_id IS NULL";
+        fw_fs = " AND fs.filter_id IS NULL";
+    }
+
+    // 1. An explicit (rig + night) pin wins, when it fits the light's filter.
     if (L.session_night) {
         auto p = db.query("SELECT fs.id, fs.label FROM light_flat_pins p "
                           "JOIN flat_sets fs ON fs.id = p.flat_set_id "
                           "WHERE p.scope = 'rig_night' AND p.rig_id = " + rig +
-                          " AND p.session_night = '" + night + "' LIMIT 1");
+                          " AND p.session_night = '" + night + "'" + fw_fs + " LIMIT 1");
         if (!p.empty() && p[0][0])
             return FlatSetPick{std::stoll(*p[0][0]),
                 "pinned flat set '" + p[0][1].value_or("") + "' for " + night};
@@ -156,38 +170,40 @@ std::optional<FlatSetPick> resolve_flat_set(db::Database& db, const LightKey& L)
 
     if (fixed) {
         if (L.session_night) {
-            // An explicit validity window covering the night, newest first.
+            // An explicit validity window covering the night, filter-fit, newest first.
             auto w = db.query(
                 "SELECT id, label FROM flat_sets WHERE rig_id = " + rig + " AND ("
                 "(valid_from IS NOT NULL AND valid_to IS NOT NULL AND '" + night + "' BETWEEN valid_from AND valid_to) OR "
-                "(valid_from IS NOT NULL AND valid_to IS NULL AND '" + night + "' >= valid_from)) "
-                "ORDER BY captured_night DESC, id DESC LIMIT 1");
+                "(valid_from IS NOT NULL AND valid_to IS NULL AND '" + night + "' >= valid_from))" + fw +
+                " ORDER BY " + fo + "captured_night DESC, id DESC LIMIT 1");
             if (!w.empty() && w[0][0])
                 return FlatSetPick{std::stoll(*w[0][0]),
                     "flat set '" + w[0][1].value_or("") + "' (window covers " + night + ")"};
-            // Else the newest set captured on or before the night.
+            // Else the newest fitting set captured on or before the night.
             auto n = db.query(
                 "SELECT id, label FROM flat_sets WHERE rig_id = " + rig +
-                " AND (captured_night IS NULL OR captured_night <= '" + night + "') "
-                "ORDER BY captured_night DESC, id DESC LIMIT 1");
+                " AND (captured_night IS NULL OR captured_night <= '" + night + "')" + fw +
+                " ORDER BY " + fo + "captured_night DESC, id DESC LIMIT 1");
             if (!n.empty() && n[0][0])
                 return FlatSetPick{std::stoll(*n[0][0]),
                     "flat set '" + n[0][1].value_or("") + "' (newest on/before " + night + ", fixed rig)"};
         }
-        // Ultimate fallback: the rig's declared active set.
+        // Fallback: the rig's declared active set, if it fits the filter.
         if (rr[0][1]) {
             const std::string sid = *rr[0][1];
-            auto a = db.query("SELECT label FROM flat_sets WHERE id = " + sid);
-            return FlatSetPick{std::stoll(sid),
-                "active flat set '" + (a.empty() ? std::string() : a[0][0].value_or("")) + "' (fixed rig)"};
+            auto a = db.query("SELECT label FROM flat_sets WHERE id = " + sid + fw);
+            if (!a.empty())
+                return FlatSetPick{std::stoll(sid),
+                    "active flat set '" + a[0][0].value_or("") + "' (fixed rig)"};
         }
         return std::nullopt;
     }
 
-    // Mobile rig: the set captured the same session night.
+    // Mobile rig: the fitting set captured the same session night.
     if (L.session_night) {
         auto s = db.query("SELECT id, label FROM flat_sets WHERE rig_id = " + rig +
-                          " AND captured_night = '" + night + "' ORDER BY id DESC LIMIT 1");
+                          " AND captured_night = '" + night + "'" + fw +
+                          " ORDER BY " + fo + "id DESC LIMIT 1");
         if (!s.empty() && s[0][0])
             return FlatSetPick{std::stoll(*s[0][0]),
                 "flat set '" + s[0][1].value_or("") + "' from the same session (" + night + ")"};

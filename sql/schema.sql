@@ -634,6 +634,9 @@ CREATE TABLE IF NOT EXISTS calibration_rules (
 CREATE TABLE IF NOT EXISTS flat_sets (
     id                 INT          NOT NULL AUTO_INCREMENT,
     rig_id             INT          NOT NULL,
+    -- A set is normally a single filter (flats detected per rig + filter + time).
+    -- NULL means it spans all filters (the older, filter-agnostic form).
+    filter_id          INT          NULL,
     label              VARCHAR(96)  NOT NULL,   -- datetime stamp or operator name
     source             ENUM('inferred','header','manual') NOT NULL DEFAULT 'inferred',
     captured_night     DATE         NULL,       -- session_night the set was shot (anchor)
@@ -651,6 +654,7 @@ CREATE TABLE IF NOT EXISTS flat_sets (
     PRIMARY KEY (id),
     UNIQUE KEY uk_flat_sets_rig_label (rig_id, label),
     KEY idx_flat_sets_rig_night (rig_id, captured_night),
+    KEY idx_flat_sets_rig_filter (rig_id, filter_id, captured_night),
     CONSTRAINT fk_flat_sets_rig FOREIGN KEY (rig_id)
         REFERENCES rigs (id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
@@ -867,6 +871,8 @@ CREATE TABLE IF NOT EXISTS object_names (
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS flat_set_id INT NULL;
 ALTER TABLE frames ADD KEY IF NOT EXISTS idx_frames_flat_set (flat_set_id);
 ALTER TABLE rigs   ADD COLUMN IF NOT EXISTS active_flat_set_id INT NULL;
+ALTER TABLE flat_sets ADD COLUMN IF NOT EXISTS filter_id INT NULL;
+ALTER TABLE flat_sets ADD KEY IF NOT EXISTS idx_flat_sets_rig_filter (rig_id, filter_id, captured_night);
 
 -- Upgrade files' seen-timestamps to microsecond precision (needed by the scan's
 -- move/delete reconciliation). Guarded so it rebuilds the table only once, not on

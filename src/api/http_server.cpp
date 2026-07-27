@@ -1528,8 +1528,10 @@ void HttpServer::Impl::routes() {
                 "SELECT fs.id, fs.rig_id, r.name, fs.label, fs.source, fs.captured_night, "
                 "fs.valid_from, fs.valid_to, "
                 "(SELECT COUNT(*) FROM frames f WHERE f.flat_set_id = fs.id), "
-                "(r.active_flat_set_id = fs.id), (r.site_id IS NOT NULL) FROM flat_sets fs "
-                "JOIN rigs r ON r.id = fs.rig_id ORDER BY r.name, fs.captured_night, fs.label");
+                "(r.active_flat_set_id = fs.id), (r.site_id IS NOT NULL), "
+                "fs.filter_id, fl.name FROM flat_sets fs "
+                "JOIN rigs r ON r.id = fs.rig_id LEFT JOIN filters fl ON fl.id = fs.filter_id "
+                "ORDER BY r.name, fs.captured_night, fl.name, fs.label");
             auto pinrows = d.query(
                 "SELECT p.id, p.flat_set_id, fs.label, p.scope, p.rig_id, r.name, p.session_night, "
                 "p.saved_query_id, q.name FROM light_flat_pins p JOIN flat_sets fs ON fs.id = p.flat_set_id "
@@ -1581,7 +1583,8 @@ void HttpServer::Impl::routes() {
                                                   "elevation_m", "timezone", "frames"})},
                 {"flat_sets", rows_to_json(fsrows, {"id", "rig_id", "rig", "label", "source",
                                                     "captured_night", "valid_from", "valid_to",
-                                                    "frames", "is_active", "is_site"})},
+                                                    "frames", "is_active", "is_site",
+                                                    "filter_id", "filter"})},
                 {"flat_pins", rows_to_json(pinrows, {"id", "flat_set_id", "flat_set", "scope",
                                                      "rig_id", "rig", "session_night",
                                                      "saved_query_id", "saved_query"})},
@@ -1848,36 +1851,38 @@ void HttpServer::Impl::routes() {
         try {
             auto d = db();
             const long long gap_s = qint(req, "gap_minutes", 45, 1, 100000) * 60LL;
+            // Ordered by rig, then filter, then time: a group is a contiguous run
+            // of one rig's flats in one filter, so groups separate by filter as
+            // well as by the DATE-OBS gap.
             auto rows = d.query(
                 "SELECT f.rig_id, r.name, f.date_obs_utc, f.session_night, "
-                "COALESCE(fl.name, f.filter_raw), UNIX_TIMESTAMP(f.date_obs_utc) "
+                "COALESCE(fl.name, f.filter_raw), UNIX_TIMESTAMP(f.date_obs_utc), f.filter_id "
                 "FROM frames f JOIN rigs r ON r.id = f.rig_id "
                 "LEFT JOIN filters fl ON fl.id = f.filter_id "
                 "WHERE f.image_type = 'flat' AND f.flat_set_id IS NULL AND f.rig_id IS NOT NULL "
-                "AND f.date_obs_utc IS NOT NULL ORDER BY f.rig_id, f.date_obs_utc");
+                "AND f.date_obs_utc IS NOT NULL "
+                "ORDER BY f.rig_id, COALESCE(f.filter_id, 0), f.date_obs_utc");
             json out = json::array();
             json cur;
-            long long cur_rig = -1, last_epoch = 0;
+            long long cur_rig = -1, cur_fid = -2, last_epoch = 0;  // -1 = NULL filter, -2 = none yet
             auto flush = [&]() { if (!cur.is_null()) { out.push_back(cur); cur = json(); } };
             for (const auto& r : rows) {
                 if (!r[0] || !r[2] || !r[5]) continue;
                 const long long rig = std::stoll(*r[0]);
                 const long long epoch = std::stoll(*r[5]);
-                const std::string filt = r[4] ? *r[4] : "";
-                if (cur.is_null() || rig != cur_rig || (epoch - last_epoch) > gap_s) {
+                const long long fid = r[6] ? std::stoll(*r[6]) : -1;
+                if (cur.is_null() || rig != cur_rig || fid != cur_fid || (epoch - last_epoch) > gap_s) {
                     flush();
                     cur = {{"rig_id", rig}, {"rig", r[1] ? *r[1] : ""},
+                           {"filter_id", fid >= 0 ? json(fid) : json(nullptr)},
+                           {"filter", r[4] ? *r[4] : ""},
                            {"start_utc", *r[2]}, {"end_utc", *r[2]},
                            {"session_night", r[3] ? json(*r[3]) : json(nullptr)},
-                           {"frames", 0}, {"filters", json::array()}};
-                    cur_rig = rig;
+                           {"frames", 0}};
+                    cur_rig = rig; cur_fid = fid;
                 }
                 cur["end_utc"] = *r[2];
                 cur["frames"] = cur["frames"].get<long long>() + 1;
-                if (!filt.empty()) {
-                    auto& fa = cur["filters"];
-                    if (std::find(fa.begin(), fa.end(), filt) == fa.end()) fa.push_back(filt);
-                }
                 last_epoch = epoch;
             }
             flush();
@@ -1898,11 +1903,13 @@ void HttpServer::Impl::routes() {
             if (rig <= 0 || label.empty() || start.empty() || end.empty()) {
                 send_error(res, 400, "rig_id, label, start_utc and end_utc are required"); return;
             }
+            const long long fid = body.value("filter_id", 0LL);  // 0 = spans all filters
             auto d = db();
             std::string cols = "rig_id, label, source, captured_start_utc, captured_end_utc";
             std::string vals = std::to_string(rig) + ", '" + d.escape(label) + "', '" +
                 d.escape(body.value("source", std::string("inferred"))) + "', '" +
                 d.escape(start) + "', '" + d.escape(end) + "'";
+            if (fid > 0) { cols += ", filter_id"; vals += ", " + std::to_string(fid); }
             for (const char* k : {"valid_from", "valid_to"})
                 if (body.contains(k) && body[k].is_string() && !body[k].get<std::string>().empty()) {
                     cols += std::string(", ") + k; vals += ", '" + d.escape(body[k].get<std::string>()) + "'";
@@ -1910,12 +1917,14 @@ void HttpServer::Impl::routes() {
             long long set_id;
             try { set_id = d.exec("INSERT INTO flat_sets (" + cols + ") VALUES (" + vals + ")"); }
             catch (const db::DbError& de) { send_error(res, de.db_errno() == 1062 ? 409 : 500, de.what()); return; }
-            // Assign the rig's raw flats and master flats captured in the window
-            // that are not already claimed by another set.
+            // Assign the rig's raw flats and master flats captured in the window that
+            // are not already claimed, scoped to the filter when the set is per-filter.
+            const std::string filter_scope = fid > 0 ? " AND filter_id = " + std::to_string(fid) : "";
             d.exec("UPDATE frames SET flat_set_id = " + std::to_string(set_id) +
                    " WHERE rig_id = " + std::to_string(rig) + " AND flat_set_id IS NULL "
-                   "AND (image_type = 'flat' OR (image_type = 'master' AND master_of = 'flat')) "
-                   "AND date_obs_utc BETWEEN '" + d.escape(start) + "' AND '" + d.escape(end) + "'");
+                   "AND (image_type = 'flat' OR (image_type = 'master' AND master_of = 'flat'))" +
+                   filter_scope + " AND date_obs_utc BETWEEN '" + d.escape(start) + "' AND '" +
+                   d.escape(end) + "'");
             const long long assigned = d.affected_rows();
             d.exec("UPDATE flat_sets SET frame_count = " + std::to_string(assigned) +
                    ", captured_night = (SELECT MIN(session_night) FROM frames WHERE flat_set_id = " +
