@@ -96,8 +96,18 @@ Two tiers, because the storage answer is "mixed".
 
 **Sweep (authoritative).** Per root, one producer thread walks with
 `std::filesystem::recursive_directory_iterator` and feeds a bounded queue; N
-extractor threads consume. Runs on a per-root interval and on demand. Bounded
-queue is what keeps memory flat on a tree of a million frames.
+extractor threads consume. Bounded queue is what keeps memory flat on a tree of a
+million frames.
+
+**When it runs.** On demand (the Roots/Database buttons, `POST /scan`,
+`starbasectl scan`) and automatically: a scheduler thread in the daemon wakes
+periodically and rescans any enabled root whose `scan_interval_s` (default 3600s)
+has elapsed since its `last_scan_end`, serialised behind the same single-scan
+guard as a manual scan (so scheduled and manual runs never overlap). Set
+`scan_scheduler = off` to make scanning fully manual, or a root's
+`scan_interval_s <= 0` to exclude just that root; `SB_SCHEDULER_TICK_S` tunes the
+check cadence (default 60s). inotify remains unimplemented, so the scheduled
+sweep is the only automatic discovery path today.
 
 **Reconciliation (why the sweep alone is authoritative).** Identity is the path
 (`files.rel_path_hash`), so a sweep that only ever inserts would leave a renamed

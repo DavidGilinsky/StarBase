@@ -192,6 +192,17 @@ struct HttpServer::Impl {
     std::thread scan_thread;
     std::atomic<bool> scan_cancel{false};
 
+    // Interval scheduler: rescans due roots on their scan_interval_s.
+    std::thread scheduler_thread;
+    std::atomic<bool> scheduler_stop{false};
+
+    // Start a background scan of `roots` if none is running (returns false if one
+    // already is). Shared by POST /scan and the scheduler so both honour the
+    // single-scan guard and report to scan_state.
+    bool try_start_scan(std::vector<db::RootRow> roots, starbase::extract::HeaderMapping mapping);
+    // Loop that periodically scans roots whose scan_interval_s has elapsed.
+    void scheduler_loop();
+
     explicit Impl(ApiConfig c) : cfg(std::move(c)) {}
 
     db::Database db() { return db::Database(cfg.db); }
@@ -900,8 +911,6 @@ void HttpServer::Impl::routes() {
     // Returns immediately; progress is polled from GET /api/v1/scan/status.
     server->Post("/api/v1/scan", [this](const httplib::Request& req, httplib::Response& res) {
         if (!write_allowed(req)) { send_error(res, 403, "a valid token is required"); return; }
-        { std::lock_guard<std::mutex> lk(scan_mtx);
-          if (scan_state.active) { send_error(res, 409, "a scan is already running"); return; } }
         // Resolve the roots and mapping up front (needs the DB) so the worker
         // thread only touches the scanner.
         std::vector<db::RootRow> roots;
@@ -918,52 +927,11 @@ void HttpServer::Impl::routes() {
             }
         } catch (const std::exception& e) { send_error(res, 500, e.what()); return; }
         if (roots.empty()) { send_error(res, 400, "no enabled roots to scan"); return; }
-
-        {
-            std::lock_guard<std::mutex> lk(scan_mtx);
-            if (scan_thread.joinable()) scan_thread.join();  // reap a finished run
-            scan_state = ScanState{};
-            scan_state.active = true;
-            scan_state.total_roots = static_cast<int>(roots.size());
-            scan_state.started = std::chrono::steady_clock::now();
-            scan_cancel.store(false);
+        const int n = static_cast<int>(roots.size());
+        if (!try_start_scan(std::move(roots), std::move(mapping))) {
+            send_error(res, 409, "a scan is already running"); return;
         }
-        auto dbc = cfg.db;
-        scan_thread = std::thread([this, roots, mapping, dbc]() mutable {
-            for (size_t i = 0; i < roots.size(); ++i) {
-                if (scan_cancel.load()) break;
-                { std::lock_guard<std::mutex> lk(scan_mtx);
-                  scan_state.root = roots[i].label; scan_state.done_roots = static_cast<int>(i);
-                  scan_state.seen = scan_state.added = scan_state.updated = scan_state.skipped =
-                      scan_state.settling = scan_state.errored = scan_state.frames = scan_state.sidecars = 0; }
-                starbase::scan::ScanConfig sc;
-                sc.settle_seconds = roots[i].settle_seconds;
-                sc.case_sensitive = roots[i].case_sensitive;
-                sc.stop = &scan_cancel;
-                sc.on_progress = [this](const starbase::scan::ScanProgress& p) {
-                    std::lock_guard<std::mutex> lk(scan_mtx);
-                    scan_state.seen = p.files_seen; scan_state.added = p.files_added;
-                    scan_state.updated = p.files_updated; scan_state.skipped = p.files_skipped;
-                    scan_state.settling = p.files_settling; scan_state.errored = p.files_error;
-                    scan_state.frames = p.frames_written; scan_state.sidecars = p.artifacts_recorded;
-                };
-                try {
-                    const auto st = starbase::scan::scan_root(dbc, roots[i], mapping, {}, sc);
-                    std::lock_guard<std::mutex> lk(scan_mtx);
-                    scan_state.results.push_back({{"root", roots[i].label}, {"added", st.files_added},
-                        {"updated", st.files_updated}, {"unchanged", st.files_skipped},
-                        {"frames", st.frames_written}, {"sidecars", st.artifacts_recorded},
-                        {"error", st.files_error}, {"ms", st.duration_ms}});
-                } catch (const std::exception& e) {
-                    std::lock_guard<std::mutex> lk(scan_mtx);
-                    scan_state.results.push_back({{"root", roots[i].label}, {"failed", std::string(e.what())}});
-                }
-            }
-            std::lock_guard<std::mutex> lk(scan_mtx);
-            scan_state.active = false; scan_state.finished = true; scan_state.root = "";
-            scan_state.done_roots = scan_state.total_roots;
-        });
-        send_json(res, json{{"started", true}, {"roots", static_cast<int>(roots.size())}}, 202);
+        send_json(res, json{{"started", true}, {"roots", n}}, 202);
     });
 
     // ---- GET /api/v1/scan/status  (live scan progress) ----
@@ -2112,6 +2080,88 @@ void HttpServer::Impl::routes() {
     }
 }
 
+bool HttpServer::Impl::try_start_scan(std::vector<db::RootRow> roots,
+                                      starbase::extract::HeaderMapping mapping) {
+    std::lock_guard<std::mutex> lk(scan_mtx);
+    if (scan_state.active) return false;
+    if (scan_thread.joinable()) scan_thread.join();  // reap a finished run
+    scan_state = ScanState{};
+    scan_state.active = true;
+    scan_state.total_roots = static_cast<int>(roots.size());
+    scan_state.started = std::chrono::steady_clock::now();
+    scan_cancel.store(false);
+    auto dbc = cfg.db;
+    scan_thread = std::thread([this, roots = std::move(roots), mapping = std::move(mapping),
+                               dbc]() mutable {
+        for (size_t i = 0; i < roots.size(); ++i) {
+            if (scan_cancel.load()) break;
+            { std::lock_guard<std::mutex> lk(scan_mtx);
+              scan_state.root = roots[i].label; scan_state.done_roots = static_cast<int>(i);
+              scan_state.seen = scan_state.added = scan_state.updated = scan_state.skipped =
+                  scan_state.settling = scan_state.errored = scan_state.frames = scan_state.sidecars = 0; }
+            starbase::scan::ScanConfig sc;
+            sc.settle_seconds = roots[i].settle_seconds;
+            sc.case_sensitive = roots[i].case_sensitive;
+            sc.stop = &scan_cancel;
+            sc.on_progress = [this](const starbase::scan::ScanProgress& p) {
+                std::lock_guard<std::mutex> lk(scan_mtx);
+                scan_state.seen = p.files_seen; scan_state.added = p.files_added;
+                scan_state.updated = p.files_updated; scan_state.skipped = p.files_skipped;
+                scan_state.settling = p.files_settling; scan_state.errored = p.files_error;
+                scan_state.frames = p.frames_written; scan_state.sidecars = p.artifacts_recorded;
+            };
+            try {
+                const auto st = starbase::scan::scan_root(dbc, roots[i], mapping, {}, sc);
+                std::lock_guard<std::mutex> lk(scan_mtx);
+                scan_state.results.push_back({{"root", roots[i].label}, {"added", st.files_added},
+                    {"updated", st.files_updated}, {"unchanged", st.files_skipped},
+                    {"frames", st.frames_written}, {"sidecars", st.artifacts_recorded},
+                    {"error", st.files_error}, {"ms", st.duration_ms}});
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lk(scan_mtx);
+                scan_state.results.push_back({{"root", roots[i].label}, {"failed", std::string(e.what())}});
+            }
+        }
+        std::lock_guard<std::mutex> lk(scan_mtx);
+        scan_state.active = false; scan_state.finished = true; scan_state.root = "";
+        scan_state.done_roots = scan_state.total_roots;
+    });
+    return true;
+}
+
+void HttpServer::Impl::scheduler_loop() {
+    // How often to look for a due root. 60s by default; SB_SCHEDULER_TICK_S tunes
+    // it (mainly for tests and unusually short intervals).
+    int tick = 60;
+    if (const char* v = std::getenv("SB_SCHEDULER_TICK_S")) { const int t = std::atoi(v); if (t > 0) tick = t; }
+    starbase::log_info("scan scheduler: on (checks every " + std::to_string(tick) +
+                       "s, honouring each root's scan_interval_s)");
+    while (!scheduler_stop.load()) {
+        for (int i = 0; i < tick && !scheduler_stop.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (scheduler_stop.load()) break;
+        { std::lock_guard<std::mutex> lk(scan_mtx); if (scan_state.active) continue; }
+        try {
+            auto d = db();
+            // Enabled roots with a positive interval that are never-scanned or overdue.
+            auto due = d.query(
+                "SELECT label FROM roots WHERE enabled = 1 AND scan_interval_s > 0 "
+                "AND (last_scan_end IS NULL OR "
+                "     last_scan_end < UTC_TIMESTAMP() - INTERVAL scan_interval_s SECOND) "
+                "ORDER BY (last_scan_end IS NULL) DESC, last_scan_end ASC");
+            std::vector<db::RootRow> roots;
+            for (const auto& r : due)
+                if (r[0]) if (auto rr = d.find_root_by_label(*r[0])) roots.push_back(*rr);
+            if (roots.empty()) continue;
+            const size_t n = roots.size();
+            if (try_start_scan(std::move(roots), starbase::index::load_mapping(d)))
+                starbase::log_info("scan scheduler: rescanning " + std::to_string(n) + " due root(s)");
+        } catch (const std::exception& e) {
+            starbase::log_warn(std::string("scan scheduler: ") + e.what());
+        }
+    }
+}
+
 void HttpServer::Impl::ensure_schema() {
     if (cfg.schema_file.empty()) return;
     try {
@@ -2197,12 +2247,22 @@ void HttpServer::start() {
     const std::string scheme = tls ? "https" : "http";
     starbase::log_info("API listening on " + scheme + "://" + bind + ":" + std::to_string(port) +
                        (impl_->cfg.web_root.empty() ? "" : " (web UI at /)"));
+
+    // Interval scanner: rescan each enabled root on its scan_interval_s.
+    impl_->scheduler_stop.store(false);
+    if (impl_->cfg.scan_scheduler)
+        impl_->scheduler_thread = std::thread([this] { impl_->scheduler_loop(); });
+    else
+        starbase::log_info("scan scheduler: off (scanning is manual)");
 }
 
 void HttpServer::stop() {
-    // Abort a running scan (scan_cancel is atomic; the scanner polls it) and
-    // reap its thread before tearing the server down.
+    // Stop the scheduler first so it cannot launch a new scan mid-teardown, then
+    // abort a running scan (scan_cancel is atomic; the scanner polls it) and reap
+    // its thread before tearing the server down.
     if (impl_) {
+        impl_->scheduler_stop.store(true);
+        if (impl_->scheduler_thread.joinable()) impl_->scheduler_thread.join();
         impl_->scan_cancel.store(true);
         if (impl_->scan_thread.joinable()) impl_->scan_thread.join();
     }

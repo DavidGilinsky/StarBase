@@ -127,6 +127,7 @@ Config Config::load(const std::string& path) {
             else if (key == "queue_depth") cfg.scanner_queue_depth = to_int(val, where);
             else if (key == "default_scan_interval_s")
                 cfg.default_scan_interval_s = to_int(val, where);
+            else if (key == "scan_scheduler") cfg.scan_scheduler = to_bool(val, where);
             else if (key == "default_settle_seconds")
                 cfg.default_settle_seconds = to_int(val, where);
             else if (key == "default_ignore_globs")

@@ -58,6 +58,10 @@ struct Config {
     int scanner_queue_depth = 4096;          // bounded: keeps memory flat on huge trees
     int default_scan_interval_s = 3600;
     int default_settle_seconds = 30;         // ignore files younger than this
+    // When on, the daemon rescans each enabled root on its own scan_interval_s.
+    // Off leaves scanning fully manual (UI button / starbasectl scan). A root
+    // with scan_interval_s <= 0 is never auto-scanned regardless.
+    bool scan_scheduler = true;
 
     // Applied to a new root by `add-root`, then editable per root. Covers
     // partial writes and the debris left by the other things that touch an

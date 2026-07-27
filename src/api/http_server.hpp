@@ -34,6 +34,7 @@ struct ApiConfig {
     std::string tls_cert;
     std::string tls_key;
     db::DbConfig db;             // handlers open their own connection from this
+    bool scan_scheduler = true;  // rescan each enabled root on its scan_interval_s
     std::string schema_file;     // for POST /api/v1/db/init (optional)
     std::string seed_file;
     // Action engine paths (staging trees, trash, default link mode).

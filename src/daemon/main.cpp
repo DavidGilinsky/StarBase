@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
         api.link_mode = cfg.link_mode;
         api.sesame_enabled = cfg.sesame_enabled;
         api.sesame_url = cfg.sesame_url;
+        api.scan_scheduler = cfg.scan_scheduler;
         api.db.host = cfg.db_host;
         api.db.port = static_cast<uint16_t>(cfg.db_port);
         api.db.user = cfg.db_user;

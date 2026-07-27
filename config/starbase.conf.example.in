@@ -62,6 +62,10 @@ queue_depth = 4096
 # Default per-root sweep interval. The scheduled sweep is authoritative;
 # inotify, where available, only makes discovery prompt.
 default_scan_interval_s = 3600
+# Automatically rescan each enabled root on its own scan_interval_s. Off leaves
+# scanning fully manual (the web UI button or 'starbasectl scan'). A root whose
+# scan_interval_s is 0 or less is never auto-scanned even when this is on.
+scan_scheduler = on
 # A file must be untouched this long before it is indexed, so frames still being
 # written are not read half-formed. Local filesystems also use IN_CLOSE_WRITE.
 #
