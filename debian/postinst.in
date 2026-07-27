@@ -147,6 +147,32 @@ SQL
         if [ -x "$CTL" ]; then
           SB_DB_PASSWORD="$DB_PASS" "$CTL" db-init >/dev/null 2>&1 || \
             echo "starbase: 'starbasectl db-init' did not run; the daemon will build the schema on start."
+
+          # If nightwatcher-ingest is present (its MariaDB user exists), grant it
+          # read access to the rig-resolution view, so it can name equipment
+          # folders from StarBase rigs. Best-effort via the local root socket, and
+          # only the single read grant on one view; otherwise the operator applies
+          # sql/grant-rig-resolve.sql by hand (see docs/INTEGRATIONS.md).
+          RSQL=
+          for c in mariadb mysql; do
+            command -v "$c" >/dev/null 2>&1 && "$c" -e 'SELECT 1' >/dev/null 2>&1 && { RSQL="$c"; break; }
+          done
+          if [ -n "$RSQL" ]; then
+            NW_HOSTS=$("$RSQL" -N -B -e "SELECT host FROM mysql.user WHERE user = 'nightwatcher'" 2>/dev/null)
+            if [ -n "$NW_HOSTS" ]; then
+              granted=0
+              for h in $NW_HOSTS; do
+                "$RSQL" -e "GRANT SELECT ON \`starbase\`.\`v_rig_resolve\` TO 'nightwatcher'@'$h'" \
+                  >/dev/null 2>&1 && granted=$((granted + 1))
+              done
+              if [ "$granted" -gt 0 ]; then
+                "$RSQL" -e "FLUSH PRIVILEGES" >/dev/null 2>&1 || true
+                echo "starbase: detected nightwatcher-ingest; granted it SELECT on starbase.v_rig_resolve."
+              else
+                echo "starbase: found the 'nightwatcher' DB user but the rig-resolve grant did not apply; run 'sudo mariadb < $PREFIX/sql/grant-rig-resolve.sql'."
+              fi
+            fi
+          fi
           if [ -n "$ROOT_PATH" ] && [ -d "$ROOT_PATH" ]; then
             LABEL=$(basename "$ROOT_PATH")
             if SB_DB_PASSWORD="$DB_PASS" "$CTL" add-root "$LABEL" "$ROOT_PATH" >/dev/null 2>&1; then

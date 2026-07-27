@@ -57,10 +57,18 @@ migration.
 
 ### Granting the consumer read access
 
-The one and only cross-tool coupling is a single `SELECT` grant. It is **not**
-applied by StarBase's own setup, because it needs the consumer's `nightwatcher`
-user to already exist. Apply it as root once both tools are installed
-(idempotent; re-run after either is reinstalled):
+The one and only cross-tool coupling is a single `SELECT` grant.
+
+**Automatic on (re)install.** The `.deb`'s `postinst` checks, via the local root
+socket, whether the `nightwatcher` MariaDB user exists; if it does, it grants that
+user `SELECT` on `v_rig_resolve` and prints a line saying so. It applies only that
+one grant, and does nothing if the user is absent or no root socket is reachable.
+So if nightwatcher-ingest is already installed, a StarBase install just works;
+install StarBase first and the grant is applied when you next reinstall/upgrade
+it, or apply it by hand.
+
+**By hand.** Apply it as root once both tools are installed (idempotent; re-run
+after either is reinstalled):
 
 ```sh
 sudo mariadb < /usr/local/starbase/sql/grant-rig-resolve.sql
