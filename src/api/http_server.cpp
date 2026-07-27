@@ -140,6 +140,21 @@ double haversine_m(double la1, double lo1, double la2, double lo2) {
     return R * 2 * std::asin(std::min(1.0, std::sqrt(a)));
 }
 
+// Advisory only: another active rig on the same camera whose focal range overlaps
+// [fmin,fmax]. Overlapping ranges make the v_rig_resolve lookup (LIMIT 1)
+// non-deterministic, the same first-match caveat EquipmentResolver carries.
+// Empty string when there is no overlap.
+std::string rig_overlap_warning(db::Database& d, long long camera_id, double fmin, double fmax,
+                                long long exclude_rig_id) {
+    auto ov = d.query("SELECT name FROM rigs WHERE status = 'active' AND camera_id = " +
+                      std::to_string(camera_id) + " AND id <> " + std::to_string(exclude_rig_id) +
+                      " AND focal_min_mm <= " + std::to_string(fmax) +
+                      " AND focal_max_mm >= " + std::to_string(fmin) + " LIMIT 1");
+    if (ov.empty() || !ov[0][0]) return {};
+    return "focal range overlaps active rig '" + *ov[0][0] +
+           "' on the same camera; rig resolution (first match) is non-deterministic where they overlap";
+}
+
 // Clamp a query-string integer to a range, with a default.
 long qint(const httplib::Request& req, const char* key, long def, long lo, long hi) {
     if (!req.has_param(key)) return def;
@@ -1614,7 +1629,9 @@ void HttpServer::Impl::routes() {
                    (site > 0 ? ", site_id = " + std::to_string(site) : "") + " WHERE camera_id = " +
                    std::to_string(cam) + " AND focal_len_mm BETWEEN " + std::to_string(fmin) +
                    " AND " + std::to_string(fmax));
-            send_json(res, json{{"id", rig_id}, {"name", name}, {"assigned", d.affected_rows()}}, 201);
+            json out = {{"id", rig_id}, {"name", name}, {"assigned", d.affected_rows()}};
+            if (auto w = rig_overlap_warning(d, cam, fmin, fmax, rig_id); !w.empty()) out["warning"] = w;
+            send_json(res, out, 201);
         } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });
@@ -1689,7 +1706,9 @@ void HttpServer::Impl::routes() {
             // either its membership or its site just changed.
             if (rig_site > 0 && (membership_changed || site_provided))
                 d.exec("UPDATE frames SET site_id = " + std::to_string(rig_site) + " WHERE rig_id = " + id);
-            send_json(res, json{{"updated", std::stoi(id)}, {"reassigned", reassigned}});
+            json out = {{"updated", std::stoi(id)}, {"reassigned", reassigned}};
+            if (auto w = rig_overlap_warning(d, cam, fmin, fmax, std::stoll(id)); !w.empty()) out["warning"] = w;
+            send_json(res, out);
         } catch (const json::exception& e) { send_error(res, 400, std::string("invalid JSON: ") + e.what()); }
           catch (const std::exception& e) { send_error(res, 500, e.what()); }
     });

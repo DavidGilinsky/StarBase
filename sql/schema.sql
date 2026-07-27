@@ -945,3 +945,29 @@ FROM frames fr
 LEFT JOIN rigs    rg ON rg.id = fr.rig_id
 LEFT JOIN filters fl ON fl.id = fr.filter_id
 GROUP BY fr.session_night, fr.image_type, fr.object_canonical, rg.name, fl.name;
+
+-- ---------------------------------------------------------------------------
+-- v_rig_resolve: PUBLIC, read-only integration contract.
+--
+-- Exposes the same (canonical camera model + focal length) -> rig-name lookup
+-- the C++ EquipmentResolver performs, so an external tool (nightwatcher-ingest)
+-- can name equipment folders from StarBase's rigs without duplicating the rule.
+-- StarBase owns the definition; consumers only read. CREATE OR REPLACE runs on
+-- every start, so this is both the fresh-install definition and the migration.
+--
+-- These four column names are a frozen interface (see docs/INTEGRATIONS.md): a
+-- consumer selects
+--   SELECT rig_name FROM v_rig_resolve
+--   WHERE camera_model = ? AND ? BETWEEN focal_min_mm AND focal_max_mm LIMIT 1;
+-- Keep the columns stable even if the internal rigs/cameras schema is refactored.
+-- Only active rigs are resolvable; overlapping focal ranges make LIMIT 1
+-- non-deterministic (same first-match caveat as EquipmentResolver).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_rig_resolve AS
+SELECT c.model        AS camera_model,
+       r.focal_min_mm AS focal_min_mm,
+       r.focal_max_mm AS focal_max_mm,
+       r.name         AS rig_name
+FROM rigs r
+JOIN cameras c ON c.id = r.camera_id
+WHERE r.status = 'active';

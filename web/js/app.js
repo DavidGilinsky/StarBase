@@ -1078,6 +1078,7 @@ async function equipment() {
             try {
               const r = await apiPost('/equipment/rigs', { name: name.value.trim(), camera_id: s.camera_id, telescope: tel.value.trim(), focal_min_mm: Number(fmin.value), focal_max_mm: Number(fmax.value), site_id: site.value ? Number(site.value) : 0 });
               sstatus.replaceChildren(el('span', { class: 'ok-msg' }, `created ${r.name}; assigned ${Number(r.assigned).toLocaleString()} frame(s)`));
+              if (r.warning) alert('Note: ' + r.warning + '.');
               equipment();
             } catch (e) { sstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }
           } }, 'Create rig'));
@@ -1117,6 +1118,7 @@ async function equipment() {
           try {
             const x = await apiPatch('/equipment/rigs/' + r.id, patch);
             if (x.reassigned) alert(`Saved; ${Number(x.reassigned).toLocaleString()} frame(s) reassigned.`);
+            if (x.warning) alert('Note: ' + x.warning + '.');
             equipment();
           } catch (e) { alert(String(e.message || e)); }
         } }, 'Save'),

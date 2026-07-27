@@ -43,3 +43,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, REFERENCES,
 -- GRANT SELECT ON nightwatcher.readings TO 'starbase'@'localhost';
 
 FLUSH PRIVILEGES;
+
+-- The reverse, opt-in coupling (nightwatcher-ingest reading StarBase's rig
+-- resolution view) is NOT applied here, because it needs the 'nightwatcher' user
+-- to already exist. Apply it once both tools are installed:
+--   sudo mariadb < sql/grant-rig-resolve.sql
+-- See docs/INTEGRATIONS.md.

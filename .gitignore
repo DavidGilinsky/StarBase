@@ -94,6 +94,7 @@ tls/
 !sql/setup.sql
 !sql/seed.sql
 !sql/equipment.example.sql
+!sql/grant-rig-resolve.sql
 !sql/migrations/*.sql
 *.sql.gz
 *.dump

@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(StarBase
-    VERSION 0.1.14
+    VERSION 0.1.15
     DESCRIPTION "A queryable interface to astronomical image files"
     HOMEPAGE_URL "https://github.com/DavidGilinsky/StarBase"
     LANGUAGES C CXX)
@@ -312,7 +312,8 @@ endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/starbase.conf.example
         DESTINATION share/starbase)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/starbased.service DESTINATION lib/systemd/system)
-install(FILES sql/schema.sql sql/setup.sql sql/seed.sql sql/equipment.example.sql DESTINATION sql)
+install(FILES sql/schema.sql sql/setup.sql sql/seed.sql sql/equipment.example.sql
+              sql/grant-rig-resolve.sql DESTINATION sql)
 install(DIRECTORY sql/migrations DESTINATION sql OPTIONAL)
 install(DIRECTORY web/ DESTINATION web OPTIONAL)
 install(DIRECTORY pjsr/ DESTINATION share/starbase/pjsr OPTIONAL)
