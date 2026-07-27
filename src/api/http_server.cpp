@@ -275,7 +275,10 @@ void HttpServer::Impl::routes() {
             j["roots"] = scalar("SELECT COUNT(*) FROM roots");
             j["files"] = scalar("SELECT COUNT(*) FROM files");
             j["frames"] = scalar("SELECT COUNT(*) FROM frames");
-            j["objects"] = scalar("SELECT COUNT(DISTINCT object) FROM frames WHERE object IS NOT NULL");
+            // Canonical targets, so the "Targets" count matches the Browse/Query
+            // target pulldown (distinct object_canonical) rather than raw OBJECT.
+            j["objects"] = scalar("SELECT COUNT(DISTINCT object_canonical) FROM frames "
+                                  "WHERE object_canonical IS NOT NULL AND object_canonical <> ''");
             j["nights"] = scalar("SELECT COUNT(DISTINCT session_night) FROM frames");
             j["errors"] = scalar("SELECT COUNT(*) FROM files WHERE status='error'");
             send_json(res, j);
@@ -874,17 +877,20 @@ void HttpServer::Impl::routes() {
         try {
             auto d = db();
             const std::string by = req.has_param("by") ? req.get_param_value("by") : "object";
-            std::string group, label;
-            if (by == "night") { group = "session_night"; label = "session_night"; }
-            else if (by == "filter") { group = "filter"; label = "filter"; }
-            else { group = "object"; label = "object"; }
+            std::string group, where;
+            if (by == "night") group = "session_night";
+            else if (by == "filter") group = "filter";
+            // Objects roll up by the canonical name, so the Dashboard's target list
+            // matches the Browse/Query target pulldown (the distinct object_canonical
+            // facet). Frames with no canonical target are omitted from that list.
+            else { group = "object_canonical";
+                   where = " WHERE object_canonical IS NOT NULL AND object_canonical <> ''"; }
 
             auto rows = d.query(
                 "SELECT COALESCE(" + group + ",'(none)') AS label, image_type, COUNT(*) AS n, "
-                "ROUND(SUM(exposure_s)/3600, 2) AS hours FROM frames "
-                "GROUP BY " + group + ", image_type ORDER BY n DESC LIMIT 500");
+                "ROUND(SUM(exposure_s)/3600, 2) AS hours FROM frames" + where +
+                " GROUP BY " + group + ", image_type ORDER BY n DESC LIMIT 500");
             send_json(res, rows_to_json(rows, {"label", "image_type", "count", "hours"}));
-            (void)label;
         } catch (const std::exception& e) {
             send_error(res, 500, e.what());
         }
