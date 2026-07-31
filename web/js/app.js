@@ -7,7 +7,7 @@
 //                the jobs ledger, and the frame detail drawer (header,
 //                calibration match, sidecars). Vanilla JS, no build step.
 // Created:       2026-07-24
-// Last Modified: 2026-07-25
+// Last Modified: 2026-07-31
 // Version:       0.2.0
 // License:       GPL-3.0-or-later
 // ---------------------------------------------------------------------------
@@ -168,18 +168,31 @@ function resultsTable(frames, extraFields) {
   return el('table', {},
     el('thead', {}, el('tr', {}, ...headers.map(h => el('th', {}, h)))),
     el('tbody', {}, ...frames.map(fr =>
-      el('tr', { onclick: () => detail(fr.frame_id) },
+      el('tr', { class: fr.file_status === 'missing' ? 'missing' : '', onclick: () => detail(fr.frame_id) },
         el('td', {}, el('span', { class: 'pill ' + fr.image_type }, fr.image_type)),
         el('td', {}, fmt(fr.object)), el('td', {}, fmt(fr.filter)),
         el('td', {}, fmt(fr.session_night)), el('td', { class: 'num' }, num(fr.exposure_s, 0) + 's'),
         el('td', { class: 'num' }, fmt(fr.gain)), el('td', {}, fmt(fr.rig)),
         ...extra.map(f => el('td', { class: FIELDS[f] === 'num' ? 'num' : '' }, fmt(fr[f]))),
-        el('td', { class: 'muted' }, fr.filename)))));
+        el('td', { class: 'muted' },
+          fr.file_status === 'missing' ? el('span', { class: 'pill missing' }, 'missing') : null,
+          fr.filename)))));
+}
+
+// Permanently remove the index rows for files the rescan soft-deleted as
+// 'missing' (already gone from disk). Dry-runs and confirms first. Returns the
+// prune result, {empty:true} if there was nothing to prune, or null if the
+// operator cancelled at the confirm.
+async function pruneMissing(days = 0) {
+  const dry = await apiPost('/db/prune-missing', { older_than_days: days, dry_run: true });
+  if (!dry.files) return { empty: true };
+  if (!confirm(`Delete ${Number(dry.files).toLocaleString()} missing file(s) and ${Number(dry.frames).toLocaleString()} frame(s)${days ? ' not seen in ' + days + '+ days' : ''}?\n\nThese files are already gone from disk; this removes their index rows, frames, and tag/collection memberships. Not reversible.`)) return null;
+  return apiPost('/db/prune-missing', { older_than_days: days, dry_run: false });
 }
 
 // ---- Browse (simple filter bar over GET /frames) ---------------------------
 
-const bstate = { filters: {}, offset: 0, limit: 50, total: 0 };
+const bstate = { filters: {}, offset: 0, limit: 50, total: 0, showMissing: false, missing: 0 };
 
 async function browse(preset) {
   if (preset) { bstate.filters = { ...preset }; bstate.offset = 0; }
@@ -212,6 +225,10 @@ async function browse(preset) {
     input('night', 'night YYYY-MM-DD'),
     select('camera', 'any camera', gFacets.camera),
     select('rig', 'any rig', gFacets.rig),
+    el('label', { class: 'chk', title: 'Include frames whose file is gone from disk' },
+      el('input', { type: 'checkbox', checked: bstate.showMissing,
+        onchange: (e) => { bstate.showMissing = e.target.checked; bstate.offset = 0; browse(); } }),
+      ' show missing'),
     el('button', { class: 'btn', onclick: () => { bstate.filters = {}; bstate.offset = 0; browse(); } }, 'Clear'),
     el('button', { class: 'btn primary', onclick: () => go('query', { ...f }) }, 'Open in Query →'));
 
@@ -219,16 +236,33 @@ async function browse(preset) {
   const pager = el('div', { class: 'pager' });
   app.replaceChildren(bar, grid, pager);
   try {
-    const q = new URLSearchParams({ limit: bstate.limit, offset: bstate.offset, ...f }).toString();
-    const data = await api('/frames?' + q);
+    const params = { limit: bstate.limit, offset: bstate.offset, ...f };
+    if (bstate.showMissing) params.include_missing = 1;
+    const data = await api('/frames?' + new URLSearchParams(params).toString());
     bstate.total = data.total;
+    bstate.missing = data.missing_hidden || 0;
     grid.replaceChildren(resultsTable(data.frames));
     const from = bstate.total ? bstate.offset + 1 : 0;
     const to = Math.min(bstate.offset + bstate.limit, bstate.total);
-    pager.replaceChildren(
+    const kids = [
       el('button', { class: 'btn', onclick: () => { if (bstate.offset > 0) { bstate.offset -= bstate.limit; browse(); } } }, '← Prev'),
       el('span', {}, `${from}–${to} of ${bstate.total.toLocaleString()}`),
-      el('button', { class: 'btn', onclick: () => { if (bstate.offset + bstate.limit < bstate.total) { bstate.offset += bstate.limit; browse(); } } }, 'Next →'));
+      el('button', { class: 'btn', onclick: () => { if (bstate.offset + bstate.limit < bstate.total) { bstate.offset += bstate.limit; browse(); } } }, 'Next →')];
+    // Deleted-but-not-pruned files are hidden by default; surface the count so a
+    // delete-then-scan is legible, with one-click reveal and (admin) prune.
+    if (bstate.missing > 0 && !bstate.showMissing) {
+      const note = el('span', { class: 'missing-note' },
+        `· ${bstate.missing.toLocaleString()} missing on disk · `,
+        el('a', { href: '#', onclick: (e) => { e.preventDefault(); bstate.showMissing = true; bstate.offset = 0; browse(); } }, 'show'));
+      if (me && me.role === 'admin')
+        note.append(' · ', el('a', { href: '#', onclick: async (e) => {
+          e.preventDefault();
+          const r = await pruneMissing(0);
+          if (r && !r.empty) browse();
+        } }, 'prune…'));
+      kids.push(note);
+    }
+    pager.replaceChildren(...kids);
   } catch (e) { showError(e); }
 }
 
@@ -1024,10 +1058,9 @@ async function database() {
       const days = Math.max(0, Number(daysIn.value) || 0);
       mstatus.replaceChildren(el('span', { class: 'muted' }, 'checking…'));
       try {
-        const dry = await apiPost('/db/prune-missing', { older_than_days: days, dry_run: true });
-        if (!dry.files) { mstatus.replaceChildren(el('span', { class: 'ok-msg' }, 'no missing files to prune')); return; }
-        if (!confirm(`Delete ${Number(dry.files).toLocaleString()} missing file(s) and ${Number(dry.frames).toLocaleString()} frame(s)${days ? ' not seen in ' + days + '+ days' : ''}?\n\nThese files are already gone from disk; this removes their index rows, frames, and tag/collection memberships. Not reversible.`)) { mstatus.replaceChildren(); return; }
-        const r = await apiPost('/db/prune-missing', { older_than_days: days, dry_run: false });
+        const r = await pruneMissing(days);
+        if (!r) { mstatus.replaceChildren(); return; }                        // cancelled
+        if (r.empty) { mstatus.replaceChildren(el('span', { class: 'ok-msg' }, 'no missing files to prune')); return; }
         mstatus.replaceChildren(el('span', { class: 'ok-msg' }, `pruned ${Number(r.pruned).toLocaleString()} file(s), ${Number(r.frames).toLocaleString()} frame(s)`));
         database();
       } catch (e) { mstatus.replaceChildren(el('span', { class: 'err-msg' }, String(e.message || e))); }

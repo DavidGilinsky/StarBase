@@ -3,7 +3,7 @@
 // File:          src/api/http_server.cpp
 // Purpose:       Implementation of the embedded HTTP/JSON API and static server.
 // Created:       2026-07-24
-// Last Modified: 2026-07-24
+// Last Modified: 2026-07-31
 // Version:       0.1.0
 // License:       GPL-3.0-or-later
 // ---------------------------------------------------------------------------
@@ -487,23 +487,38 @@ void HttpServer::Impl::routes() {
             if (req.has_param("root"))
                 where += " AND root_label = '" + d.escape(req.get_param_value("root")) + "'";
 
+            // Deleted files are soft-marked 'missing' by scan reconciliation. Hide
+            // them (and drop them from the count) by default, so a delete-then-scan
+            // visibly shrinks the list; pass include_missing=1 to show them.
+            const bool include_missing = req.get_param_value("include_missing") == "1";
+            const std::string filt_where = where;   // the filters only, for the tally
+            if (!include_missing) where += " AND file_status <> 'missing'";
+
             const std::string total_sql = "SELECT COUNT(*) FROM v_frames" + where;
             auto tr = d.query(total_sql);
             const long long total = (tr.empty() || !tr[0][0]) ? 0 : std::stoll(*tr[0][0]);
 
+            long long missing_hidden = 0;
+            if (!include_missing) {
+                auto mr = d.query("SELECT COUNT(*) FROM v_frames" + filt_where +
+                                  " AND file_status = 'missing'");
+                if (!mr.empty() && mr[0][0]) missing_hidden = std::stoll(*mr[0][0]);
+            }
+
             const std::vector<std::string> cols = {
                 "frame_id",   "abs_path",   "filename",  "image_type", "object",
                 "filter",     "session_night", "date_obs_utc", "exposure_s", "gain",
-                "rig",        "camera",     "site",      "sqm_mag_arcsec2"};
+                "rig",        "camera",     "site",      "sqm_mag_arcsec2", "file_status"};
             auto rows = d.query(
                 "SELECT frame_id, abs_path, filename, image_type, object, filter, "
                 "session_night, date_obs_utc, exposure_s, gain, rig, camera, site, "
-                "sqm_mag_arcsec2 FROM v_frames" + where +
+                "sqm_mag_arcsec2, file_status FROM v_frames" + where +
                 " ORDER BY date_obs_utc DESC LIMIT " + std::to_string(limit) +
                 " OFFSET " + std::to_string(offset));
 
             json j;
             j["total"] = total;
+            j["missing_hidden"] = missing_hidden;
             j["limit"] = limit;
             j["offset"] = offset;
             j["frames"] = rows_to_json(rows, cols);
@@ -574,13 +589,30 @@ void HttpServer::Impl::routes() {
             const long limit = std::max(1L, std::min(500L, body.value("limit", 50L)));
             const long offset = std::max(0L, body.value("offset", 0L));
 
-            auto tr = d.query("SELECT COUNT(*) FROM v_frames WHERE " + where);
+            // Hide soft-deleted ('missing') files by default, unless the caller
+            // opts in with include_missing or explicitly filters on file_status
+            // (so a deliberate `file_status = missing` query still works).
+            bool filter_has_status = false;
+            for (const auto& fn : starbase::query::filter_fields(body.value("filter", json())))
+                if (fn == "file_status") { filter_has_status = true; break; }
+            const bool hide_missing =
+                !body.value("include_missing", false) && !filter_has_status;
+            const std::string eff_where =
+                hide_missing ? "(" + where + ") AND file_status <> 'missing'" : where;
+
+            auto tr = d.query("SELECT COUNT(*) FROM v_frames WHERE " + eff_where);
             const long long total = (tr.empty() || !tr[0][0]) ? 0 : std::stoll(*tr[0][0]);
+            long long missing_hidden = 0;
+            if (hide_missing) {
+                auto mr = d.query("SELECT COUNT(*) FROM v_frames WHERE (" + where +
+                                  ") AND file_status = 'missing'");
+                if (!mr.empty() && mr[0][0]) missing_hidden = std::stoll(*mr[0][0]);
+            }
 
             std::vector<std::string> cols = {
                 "frame_id",   "abs_path",   "filename",  "image_type", "object",
                 "filter",     "session_night", "date_obs_utc", "exposure_s", "gain",
-                "rig",        "camera",     "site",      "sqm_mag_arcsec2"};
+                "rig",        "camera",     "site",      "sqm_mag_arcsec2", "file_status"};
             // Reflect the query: add each field the filter used as a column (when
             // it is a real v_frames column and not already selected), and echo the
             // queried field list so the UI can render those columns.
@@ -599,15 +631,16 @@ void HttpServer::Impl::routes() {
 
             std::string sel;
             for (size_t i = 0; i < cols.size(); ++i) sel += (i ? ", " : "") + cols[i];
-            auto rows = d.query("SELECT " + sel + " FROM v_frames WHERE " + where +
+            auto rows = d.query("SELECT " + sel + " FROM v_frames WHERE " + eff_where +
                                 " ORDER BY " + order + " LIMIT " + std::to_string(limit) +
                                 " OFFSET " + std::to_string(offset));
 
             json j;
             j["total"] = total;
+            j["missing_hidden"] = missing_hidden;
             j["limit"] = limit;
             j["offset"] = offset;
-            j["where"] = where;             // echoed so a caller can see the predicate
+            j["where"] = eff_where;         // echoed so a caller can see the predicate
             j["query_fields"] = query_fields;  // fields the filter used, for result columns
             j["frames"] = rows_to_json(rows, cols);
             send_json(res, j);
