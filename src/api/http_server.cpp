@@ -269,7 +269,11 @@ struct HttpServer::Impl {
 };
 
 void HttpServer::Impl::routes() {
-    server->set_default_headers({{"Access-Control-Allow-Origin", "*"}});
+    // no-cache so a redeployed web UI (app.js/app.css/index.html) is picked up on
+    // the next load instead of served stale from the browser's heuristic cache;
+    // the browser still revalidates and takes a 304 when nothing has changed.
+    server->set_default_headers({{"Access-Control-Allow-Origin", "*"},
+                                 {"Cache-Control", "no-cache"}});
 
     // ---- GET /api/v1/status ----
     server->Get("/api/v1/status", [this](const httplib::Request&, httplib::Response& res) {
